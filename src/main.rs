@@ -105,7 +105,7 @@ fn main() -> io::Result<()> {
 
     let mut all_dirs = vec![args.root_dir.clone()];
     all_dirs.extend(args.src_dirs.clone());
-    let min_file_size = args.min_file_size.unwrap_or(1_048_576); // Default to 1MB
+    let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
     log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
     let files = collect_large_files(&all_dirs, min_file_size)?;
     log::info!("Found {} large files", files.len());
@@ -287,6 +287,33 @@ mod tests {
 
         assert_eq!(name1, "video.mkv@2097152");
         assert_eq!(name2, "size-1048576");
+    }
+
+    #[test]
+    fn test_cli_parsing_basic() {
+        // Test the parsing logic by checking that our parse_file_size function works correctly
+        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("10KB").unwrap(), 10_240);
+    }
+
+    #[test]
+    fn test_cli_dedup_mode() {
+        assert_eq!(
+            format!("{:?}", DedupKey::FilenameAndSize),
+            "FilenameAndSize"
+        );
+        assert_eq!(format!("{:?}", DedupKey::SizeOnly), "SizeOnly");
+    }
+
+    #[test]
+    fn test_group_key_creation() {
+        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
+        let key2 = GroupKey::SizeOnly(1024);
+
+        // Test that keys can be created and compared
+        assert_eq!(key1, key1);
+        assert_eq!(key2, key2);
+        assert_ne!(key1, key2);
     }
 
     #[test]
