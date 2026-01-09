@@ -7,6 +7,11 @@ use log::{debug, error, info};
 use tempfile::NamedTempFile;
 use memmap2::{Mmap, MmapOptions};
 
+// Register temp files for cleanup
+fn register_temp_file(path: &PathBuf) {
+    crate::register_temp_file(path.clone());
+}
+
 const BUFFER_SIZE: usize = 1 << 20; // 1MB
 const BYTE_ALIGNMENT: usize = 8;
 const MMAP_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB - use mmap for files >= 5MB
@@ -214,6 +219,7 @@ fn handle_successful_merge(
                 } else {
                     // Real processing
                     let local_temp = NamedTempFile::new_in(parent)?;
+                    register_temp_file(&local_temp.path().to_path_buf());
                     fs::copy(temp.path(), local_temp.path())?;
                     if replace {
                         fs::rename(local_temp.path(), path)?;
@@ -453,6 +459,7 @@ pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mm
 
     let temp_dir = find_temp_directory(paths, filter)?;
     let temp = NamedTempFile::new_in(temp_dir)?;
+    register_temp_file(&temp.path().to_path_buf());
     let file = temp.reopen()?;
     let mut writer = BufWriter::new(file);
 

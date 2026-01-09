@@ -6,12 +6,44 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod merger;
 pub mod cache;
+
+// Global cleanup registry for temporary files
+static TEMP_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+fn register_temp_file(path: PathBuf) {
+    if let Ok(mut files) = TEMP_FILES.lock() {
+        files.push(path);
+    }
+}
+
+fn cleanup_temp_files() {
+    if let Ok(files) = TEMP_FILES.lock() {
+        for path in files.iter() {
+            if path.exists() {
+                if let Err(e) = fs::remove_file(path) {
+                    log::warn!("Failed to cleanup temp file {:?}: {}", path, e);
+                } else {
+                    log::debug!("Cleaned up temp file: {:?}", path);
+                }
+            }
+        }
+    }
+}
+
+// Set up panic hook to cleanup on panic
+fn setup_cleanup_on_panic() {
+    std::panic::set_hook(Box::new(|panic_info| {
+        log::error!("Program panicked: {}", panic_info);
+        cleanup_temp_files();
+    }));
+}
 
 fn parse_file_size(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
@@ -56,7 +88,7 @@ enum GroupKey {
 #[command(name = "torrent-combine")]
 struct Args {
     root_dir: PathBuf,
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, help = "Specify source directories to treat as read-only (can be used multiple times)")]
     src_dirs: Vec<PathBuf>,
     #[arg(long, value_parser = parse_file_size, help = "Minimum file size to process (e.g., '10MB', '1GB', '1048576'). Default: 1MB")]
     min_file_size: Option<u64>,
@@ -146,6 +178,9 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -
 }
 
 fn main() -> io::Result<()> {
+    // Set up cleanup handlers
+    setup_cleanup_on_panic();
+
     let args = Args::parse();
 
     // Configure logging based on verbose flag
@@ -519,6 +554,10 @@ fn main() -> io::Result<()> {
     log::info!("  - Merged: {}", final_merged);
     log::info!("  - Skipped: {}", final_skipped);
     log::info!("--------------------");
+
+    // Clean up any remaining temporary files
+    cleanup_temp_files();
+
     Ok(())
 }
 

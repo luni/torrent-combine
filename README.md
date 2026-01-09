@@ -1,18 +1,32 @@
 # Torrent Combine
 
-A Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Merged files are saved with a `.merged` suffix or can replace originals with the `--replace` flag.
+A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, and robust error handling.
 
 ## Description
 
 This tool scans a root directory recursively for files larger than 1MB (targeting video files). It assumes partial torrent downloads are pre-allocated with zeros and merges compatible files:
 
-- **Grouping**: Files with identical basenames and sizes.
-- **Sanity Check**: Non-zero bytes at each position must match across files.
-- **Merge**: Bitwise OR of contents to combine downloaded chunks.
-- **Output**: Creates `.merged` files for incomplete originals (unless `--replace` is used to overwrite them).
-- Skips groups if all files are already complete or if sanity fails.
+- **Grouping**: Files with identical basenames and sizes (or other deduplication modes)
+- **Sanity Check**: Non-zero bytes at each position must match across files
+- **Merge**: Bitwise OR of contents to combine downloaded chunks
+- **Output**: Creates `.merged` files for incomplete originals (unless `--replace` is used)
+- **Caching**: Intelligent file verification caching for faster subsequent runs
+- **Progress Bars**: Real-time progress feedback for file scanning and processing
+- **Error Handling**: Graceful handling of malformed paths, permission issues, and filesystem errors
 
 For details, see [DESIGN.md](DESIGN.md).
+
+## Features
+
+- **🚀 High Performance**: Automatic memory mapping for files ≥ 5MB (23x faster with caching)
+- **💾 Intelligent Caching**: Skip re-verification of unchanged files between runs
+- **📊 Progress Bars**: Real-time progress for file discovery and group processing
+- **🛡️ Robust Error Handling**: Graceful handling of malformed paths and permission issues
+- **🔧 Multiple Deduplication Modes**: Group by filename+size, size-only, or extension+size
+- **🧹 Clean Cleanup**: Automatic temporary file cleanup on success, failure, or cancellation
+- **⚡ Parallel Processing**: Multi-threaded processing for faster execution
+- **🎯 Dry Run Mode**: Preview operations without modifying files
+- **📁 Extension Filtering**: Process only specific file types
 
 ## Installation
 
@@ -40,20 +54,31 @@ Run the tool with a root directory path:
 torrent-combine /path/to/torrent/root/dir
 ```
 
-### Options
+## Options
 
-- `--replace`: Replace incomplete original files with merged content instead of creating `.merged` files.
-- `--dry-run`: Show what would happen without actually modifying any files.
-- `--extensions <EXT1,EXT2,...>`: Only process files with specified extensions (e.g., `mkv,mp4,avi`). Default: all files.
-- `--dedup-mode <MODE>`: Deduplication mode. Options:
+### Core Options
+- `--replace`: Replace incomplete original files with merged content instead of creating `.merged` files
+- `--dry-run`: Show what would happen without actually modifying any files
+- `--extensions <EXT1,EXT2,...>`: Only process files with specified extensions (e.g., `mkv,mp4,avi`). Default: all files
+- `--dedup-mode <MODE>`: Deduplication mode:
   - `filename-and-size`: Group files by filename and size (default)
   - `size-only`: Group files by size only
   - `extension-and-size`: Group files by extension and size
+
+### Performance Options
 - `--no-mmap`: Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)
+- `--no-cache`: Disable caching (slower but uses less disk space)
+- `--clear-cache`: Clear cache before processing
+- `--num-threads <N>`: Set number of processing threads (default: CPU count)
+
+### Source Directory Options
+- `--src-dirs <DIR>`: Specify source directories to treat as read-only (can be used multiple times)
+- `--min-file-size <SIZE>`: Minimum file size to process (e.g., `10MB`, `1GB`, `1048576`). Default: 1MB
+
+### Output Options
+- `--verbose`: Enable verbose logging (may interfere with progress bar)
 
 ## Examples
-
-Assume two partial files `/downloads/torrent-a/video.mkv` (size 10MB, partial) and `/downloads/torrent-b/video.mkv` (size 10MB, more complete):
 
 ### Basic Usage
 
@@ -62,8 +87,6 @@ torrent-combine /downloads
 ```
 
 This creates `/downloads/torrent-a/video.mkv.merged` if the `torrent-a/video.mkv` was able to fill in missing chunks from `torrent-b/video.mkv`.
-
-Likewise the `/downloads/torrent-b/video.mkv.merged` file is created if the `torrent-b/video.mkv` file was able to fill in missing chunks from `torrent-a/video.mkv`.
 
 ### Dry Run Mode
 
@@ -81,13 +104,35 @@ torrent-combine /downloads --extensions mkv,mp4,avi
 
 Only processes files with `.mkv`, `.mp4`, or `.avi` extensions.
 
-### Extension and Size Grouping
+### Size-Based Filtering
 
 ```bash
-torrent-combine /downloads --dedup-mode extension-and-size
+torrent-combine /downloads --min-file-size 10MB
 ```
 
-Groups files by extension and size instead of filename. Useful when files have different names but same content type.
+Only processes files larger than 10MB.
+
+### Different Deduplication Modes
+
+```bash
+# Group by extension and size (useful for files with different names)
+torrent-combine /downloads --dedup-mode extension-and-size
+
+# Group by size only (useful for identical files with different names)
+torrent-combine /downloads --dedup-mode size-only
+```
+
+### Source Directory Control
+
+```bash
+# Single source directory
+torrent-combine /downloads --src-dirs /readonly/torrents
+
+# Multiple source directories (can be used multiple times)
+torrent-combine /downloads --src-dirs /readonly/torrents --src-dirs /backup/torrents --src-dirs /archive/torrents
+```
+
+Treat files in specified directories as read-only sources (won't be modified). This is useful when you have completed downloads in one location and want to use them as sources to fix incomplete downloads in another location.
 
 ### In-place Replacement
 
@@ -95,23 +140,35 @@ Groups files by extension and size instead of filename. Useful when files have d
 torrent-combine /downloads --replace
 ```
 
-This overwrites the incomplete `/downloads/torrent-a/video.mkv` and or `/downloads/torrent-b/video.mkv` with the merged content if applicable.
+This overwrites the incomplete files with merged content instead of creating `.merged` files.
 
-### Memory Mapping (Performance)
+### Performance Optimization
 
 ```bash
+# Automatic optimization (default)
 torrent-combine /downloads
+
+# Disable memory mapping (for compatibility/debugging)
+torrent-combine /downloads --no-mmap
+
+# Disable caching (saves disk space)
+torrent-combine /downloads --no-cache
+
+# Clear existing cache
+torrent-combine /downloads --clear-cache
 ```
 
-**Automatic optimization**: Memory mapping is automatically used for files ≥ 5MB for optimal performance.
+### Verbose Output
 
 ```bash
-torrent-combine /downloads --no-mmap
+torrent-combine /downloads --verbose
 ```
 
-Disable memory mapping and use regular I/O for all files (useful for compatibility or debugging).
+Shows detailed processing information (may interfere with progress bar display).
 
 ## Performance
+
+### Memory Mapping Benefits
 
 Memory mapping provides substantial performance improvements for large files:
 
@@ -119,6 +176,61 @@ Memory mapping provides substantial performance improvements for large files:
 - **1MB files**: ~8.5x faster (177µs → 20.8µs)
 
 The tool automatically uses the optimal I/O method based on file size, with a 5MB threshold for memory mapping.
+
+### Caching Performance
+
+Intelligent caching dramatically speeds up subsequent runs:
+
+- **First run**: Full file verification and processing
+- **Second run**: ~23x faster (1.369s → 0.060s) when files haven't changed
+
+Cache automatically detects file modifications and only reprocesses changed files.
+
+## Cache Management
+
+The tool automatically creates and manages a cache in `.torrent-combine-cache/`:
+
+- **File metadata caching**: Stores file sizes, modification times, and hashes
+- **Group result caching**: Stores processing results for each file group
+- **Automatic cleanup**: Cache entries expire after 1 hour
+- **Change detection**: Automatically invalidates cache when files are modified
+
+### Cache Control
+
+```bash
+# Clear cache manually
+torrent-combine /downloads --clear-cache
+
+# Disable caching entirely
+torrent-combine /downloads --no-cache
+
+# Check cache status (verbose mode)
+torrent-combine /downloads --verbose | grep "cached"
+```
+
+## Error Handling
+
+The tool gracefully handles various error conditions:
+
+- **Malformed paths**: Skips files with invalid characters (null bytes, extremely long names)
+- **Permission issues**: Continues processing other files when access is denied
+- **Filesystem errors**: Logs warnings and continues with other files
+- **Temporary file cleanup**: Automatically cleans up `.tmp` files on success, failure, or cancellation
+
+## Progress Indicators
+
+The tool provides clear progress feedback:
+
+```
+⠁ Scanning for large files...
+File scanning complete
+⠁ [00:00:03] [####################] 15/20 (ETA: 0s) Processing groups
+Processing complete
+```
+
+- **Discovery phase**: Spinner animation while scanning directories
+- **Processing phase**: Progress bar with current/total count and ETA
+- **Cache hits**: Shows "cached" messages when using cached results
 
 ## Contributing
 
