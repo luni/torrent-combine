@@ -4,18 +4,6 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
-    /// Root directory to search for files
-    #[arg(short, long)]
-    pub root_dir: PathBuf,
-
-    /// Source directories to search in (default: root_dir)
-    #[arg(long = "src", value_parser, value_delimiter = ',')]
-    pub src_dirs: Vec<PathBuf>,
-
-    /// Directories to exclude from search
-    #[arg(long = "exclude", value_parser, value_delimiter = ',')]
-    pub exclude: Vec<PathBuf>,
-
     /// Minimum file size to consider (e.g., "10MB", "1GB")
     #[arg(short = 's', long = "min-size", value_parser = crate::utils::parse_file_size)]
     pub min_file_size: Option<u64>,
@@ -29,7 +17,7 @@ pub struct Args {
     pub dry_run: bool,
 
     /// File extensions to consider (default: all)
-    #[arg(short = 'e', long = "ext", value_parser, value_delimiter = ',')]
+    #[arg(short = 'e', long = "ext")]
     pub extensions: Vec<String>,
 
     /// Number of threads to use (default: number of CPU cores)
@@ -55,6 +43,18 @@ pub struct Args {
     /// Clear cache before processing
     #[arg(long)]
     pub clear_cache: bool,
+
+    /// Source directories to search in (read-only, files won't be modified)
+    #[arg(long = "src")]
+    pub src_dirs: Vec<PathBuf>,
+
+    /// Directories to exclude from search
+    #[arg(long = "exclude")]
+    pub exclude: Vec<PathBuf>,
+
+    /// Root directories to search for files
+    #[arg(required = true)]
+    pub root_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -121,16 +121,18 @@ mod tests {
     fn test_cli_parsing_basic() {
         let args = vec![
             "torrent-combine",
-            "--root-dir",
-            "/test/path",
             "--min-size",
             "10MB",
             "--replace",
             "--dry-run",
+            "/test/path",
+            "/another/path",
         ];
 
         let parsed = Args::parse_from(args);
-        assert_eq!(parsed.root_dir, PathBuf::from("/test/path"));
+        assert_eq!(parsed.root_dirs.len(), 2);
+        assert!(parsed.root_dirs.contains(&PathBuf::from("/test/path")));
+        assert!(parsed.root_dirs.contains(&PathBuf::from("/another/path")));
         assert_eq!(parsed.min_file_size, Some(10 * 1024 * 1024));
         assert!(parsed.replace);
         assert!(parsed.dry_run);
@@ -140,10 +142,9 @@ mod tests {
     fn test_cli_dedup_mode() {
         let args = vec![
             "torrent-combine",
-            "--root-dir",
-            "/test/path",
             "--dedup",
             "size-only",
+            "/test/path",
         ];
 
         let parsed = Args::parse_from(args);
@@ -280,10 +281,13 @@ mod tests {
     fn test_multiple_src_dirs_parsing() {
         let args = vec![
             "torrent-combine",
-            "--root-dir",
-            "/test/path",
             "--src",
-            "/src1,/src2,/src3",
+            "/src1",
+            "--src",
+            "/src2",
+            "--src",
+            "/src3",
+            "/test/path",
         ];
 
         let parsed = Args::parse_from(args);
@@ -297,10 +301,11 @@ mod tests {
     fn test_multiple_exclude_parsing() {
         let args = vec![
             "torrent-combine",
-            "--root-dir",
-            "/test/path",
             "--exclude",
-            "/exclude1,/exclude2",
+            "/exclude1",
+            "--exclude",
+            "/exclude2",
+            "/test/path",
         ];
 
         let parsed = Args::parse_from(args);

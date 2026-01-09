@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Initialize cache
-    let cache_dir = args.root_dir.join(".torrent-combine-cache");
+    let cache_dir = args.root_dirs[0].join(".torrent-combine-cache");
     let _cache = FileCache::new(cache_dir.clone(), 3600); // 1 hour TTL
 
     // Clear cache if requested
@@ -52,17 +52,21 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("Cache cleared.");
     }
 
-    // Set default src_dirs to root_dir if not specified
-    let src_dirs = if args.src_dirs.is_empty() {
-        vec![args.root_dir.clone()]
+    // Determine which directories to scan and which are read-only
+    let scan_dirs = if args.src_dirs.is_empty() {
+        // No src dirs specified, so root_dirs are both source and target
+        args.root_dirs.clone()
     } else {
-        args.src_dirs.clone()
+        // src_dirs specified, so root_dirs are targets and src_dirs are read-only sources
+        args.root_dirs.clone()
     };
+
+    let src_dirs = args.src_dirs.clone();
 
     // Collect files
     println!("Scanning for files...");
     let files = file_ops::collect_large_files(
-        &src_dirs,
+        &scan_dirs,
         args.min_file_size.unwrap_or(0),
         &args.extensions,
         &args.exclude,
@@ -102,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .collect::<Vec<_>>()
         .par_iter()
         .map(|(group_name, files)| {
-            let result = process_group(group_name, files, &args, cache_dir.clone(), args.dry_run);
+            let result = process_group(group_name, files, &args, cache_dir.clone(), args.dry_run, &src_dirs);
             progress.inc(1);
             result
         })
@@ -149,6 +153,7 @@ fn process_group(
     args: &Args,
     cache_dir: PathBuf,
     dry_run: bool,
+    src_dirs: &[PathBuf],
 ) -> Result<merger::GroupStats, Box<dyn std::error::Error + Send + Sync>> {
     // Initialize cache for this group
     let mut cache = FileCache::new(cache_dir, 3600);
@@ -177,7 +182,7 @@ fn process_group(
         files,
         group_name,
         args.replace,
-        &args.src_dirs,
+        src_dirs,
         dry_run,
         args.no_mmap,
     )?;

@@ -76,8 +76,9 @@ torrent-combine /path/to/torrent/root/dir
 - `--clear-cache`: Clear cache before processing
 - `--num-threads <N>`: Set number of processing threads (default: CPU count)
 
-### Source Directory Options
-- `--src-dirs <DIR>`: Specify source directories to treat as read-only (can be used multiple times)
+### Directory Options
+- `<ROOT_DIRS>`: Root directories to search for files (positional arguments, required)
+- `--src <DIR>`: Specify source directories to treat as read-only (can be used multiple times, files won't be modified)
 - `--exclude <DIR>`: Exclude directories from scanning (can be used multiple times)
 - `--min-file-size <SIZE>`: Minimum file size to process (e.g., `10MB`, `1GB`, `1048576'). Default: 1MB
 
@@ -89,8 +90,25 @@ torrent-combine /path/to/torrent/root/dir
 ### Basic Usage
 
 ```bash
+# Single directory (files can be both source and target)
 torrent-combine /downloads
+
+# Multiple directories (files can be both source and target)
+torrent-combine /downloads1 /downloads2 /downloads3
+
+# Multiple directories with separate read-only source directories
+torrent-combine /downloads1 /downloads2 --src /readonly/torrents --src /backup/torrents
+
+# Multiple directories with exclusions
+torrent-combine /downloads1 /downloads2 --exclude /temp --exclude /cache
+
+# Combined with other options
+torrent-combine /downloads1 /downloads2 --src /readonly/torrents --exclude /temp --extensions mkv --min-size 10MB
 ```
+
+**Behavior:**
+- **Without `--src`**: Files in root directories can be both read from and written to
+- **With `--src`**: Files in `--src` directories are read-only, files in root directories are targets
 
 This creates `/downloads/torrent-a/video.mkv.merged` if the `torrent-a/video.mkv` was able to fill in missing chunks from `torrent-b/video.mkv`.
 
@@ -132,16 +150,16 @@ torrent-combine /downloads --dedup-mode size-only
 
 ```bash
 # Single source directory
-torrent-combine /downloads --src-dirs /readonly/torrents
+torrent-combine /downloads --src /readonly/torrents
 
 # Multiple source directories (can be used multiple times)
-torrent-combine /downloads --src-dirs /readonly/torrents --src-dirs /backup/torrents --src-dirs /archive/torrents
+torrent-combine /downloads --src /readonly/torrents --src /backup/torrents --src /archive/torrents
 
 # Exclude directories from scanning
 torrent-combine /downloads --exclude /downloads/temp --exclude /downloads/incomplete
 
 # Combine source and exclude options
-torrent-combine /downloads --src-dirs /readonly/torrents --exclude /downloads/temp --exclude /downloads/cache
+torrent-combine /downloads --src /readonly/torrents --exclude /downloads/temp --exclude /downloads/cache
 ```
 
 Treat files in specified directories as read-only sources (won't be modified). This is useful when you have completed downloads in one location and want to use them as sources to fix incomplete downloads in another location.
