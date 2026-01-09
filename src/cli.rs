@@ -140,12 +140,7 @@ mod tests {
 
     #[test]
     fn test_cli_dedup_mode() {
-        let args = vec![
-            "torrent-combine",
-            "--dedup",
-            "size-only",
-            "/test/path",
-        ];
+        let args = vec!["torrent-combine", "--dedup", "size-only", "/test/path"];
 
         let parsed = Args::parse_from(args);
         assert!(matches!(parsed.dedup_mode, DedupKey::SizeOnly));

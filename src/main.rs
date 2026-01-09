@@ -106,7 +106,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .collect::<Vec<_>>()
         .par_iter()
         .map(|(group_name, files)| {
-            let result = process_group(group_name, files, &args, cache_dir.clone(), args.dry_run, &src_dirs);
+            let result = process_group(
+                group_name,
+                files,
+                &args,
+                cache_dir.clone(),
+                args.dry_run,
+                &src_dirs,
+            );
             progress.inc(1);
             result
         })
