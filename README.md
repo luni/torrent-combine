@@ -1,11 +1,11 @@
 # Torrent Combine
 
-[![CI](https://github.com/mason-larobina/torrent-combine/workflows/test/badge.svg)](https://github.com/mason-larobina/torrent-combine/actions/workflows/test.yml)
-[![Coverage](https://codecov.io/gh/mason-larobina/torrent-combine/branch/main/graph/badge.svg)](https://codecov.io/gh/mason-larobina/torrent-combine)
+[![CI](https://github.com/luni/torrent-combine/workflows/test/badge.svg)](https://github.com/luni/torrent-combine/actions/workflows/test.yml)
+[![Coverage](https://codecov.io/gh/luni/torrent-combine/branch/main/graph/badge.svg)](https://codecov.io/gh/luni/torrent-combine)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Crates.io](https://img.shields.io/crates/v/torrent-combine.svg)](https://crates.io/crates/torrent-combine)
 
-A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, and robust error handling.
+A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, robust error handling, and smart copy functionality with fuzzy filename matching.
 
 ## Description
 
@@ -15,6 +15,7 @@ This tool scans a root directory recursively for files larger than 1MB (targetin
 - **Sanity Check**: Non-zero bytes at each position must match across files
 - **Merge**: Bitwise OR of contents to combine downloaded chunks
 - **Output**: Creates `.merged` files for incomplete originals (unless `--replace` is used)
+- **Smart Copy**: Copy complete source files to empty destination files with fuzzy filename matching
 - **Caching**: Intelligent file verification caching for faster subsequent runs
 - **Progress Bars**: Real-time progress feedback for file scanning and processing
 - **Error Handling**: Graceful handling of malformed paths, permission issues, and filesystem errors
@@ -32,6 +33,8 @@ For details, see [DESIGN.md](DESIGN.md).
 - **⚡ Parallel Processing**: Multi-threaded processing for faster execution
 - **🎯 Dry Run Mode**: Preview operations without modifying files
 - **📁 Extension Filtering**: Process only specific file types
+- **📋 Smart Copy**: Copy source to empty destination files with fuzzy filename matching
+- **🔍 Fuzzy Matching**: Intelligent filename matching (80% similarity, min 5 characters)
 
 ## Installation
 
@@ -82,6 +85,9 @@ torrent-combine /path/to/torrent/root/dir
 - `--exclude <DIR>`: Exclude directories from scanning (can be used multiple times)
 - `--min-file-size <SIZE>`: Minimum file size to process (e.g., `10MB`, `1GB`, `1048576'). Default: 1MB
 
+### Copy Options
+- `--copy-empty-dst`: Copy source to destination when filename and size match, destination is empty (null bytes only), and source contains data. Supports fuzzy filename matching (80% similarity, min 5 characters)
+
 ### Output Options
 - `--verbose`: Enable verbose logging (may interfere with progress bar)
 
@@ -104,6 +110,9 @@ torrent-combine /downloads1 /downloads2 --exclude /temp --exclude /cache
 
 # Combined with other options
 torrent-combine /downloads1 /downloads2 --src /readonly/torrents --exclude /temp --extensions mkv --min-size 10MB
+
+# Combined with copy functionality
+torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dedup size-only --extensions mkv
 ```
 
 **Behavior:**
@@ -158,13 +167,16 @@ torrent-combine /downloads --src /readonly/torrents --src /backup/torrents --src
 # Exclude directories from scanning
 torrent-combine /downloads --exclude /downloads/temp --exclude /downloads/incomplete
 
+# Note: When using '.' as root directory, use './' prefix for excludes
+torrent-combine . --exclude ./temp --exclude ./cache
+
 # Combine source and exclude options
 torrent-combine /downloads --src /readonly/torrents --exclude /downloads/temp --exclude /downloads/cache
 ```
 
 Treat files in specified directories as read-only sources (won't be modified). This is useful when you have completed downloads in one location and want to use them as sources to fix incomplete downloads in another location.
 
-The `--exclude` option prevents scanning of specified directories and all their subdirectories, which is useful for skipping temporary files, cache directories, or incomplete downloads.
+The `--exclude` option prevents scanning of specified directories and all their subdirectories, which is useful for skipping temporary files, cache directories, or incomplete downloads. **Important**: When using `.` as the root directory, exclude paths must use the `./` prefix (e.g., `./subdir` instead of `subdir`).
 
 ### In-place Replacement
 
@@ -197,6 +209,37 @@ torrent-combine /downloads --verbose
 ```
 
 Shows detailed processing information (may interfere with progress bar display).
+
+### Copy Empty Destination Files
+
+```bash
+# Copy source to empty destination files (exact filename match)
+torrent-combine /downloads --src /complete/torrents --copy-empty-dst
+
+# Copy with fuzzy filename matching (80% similarity, min 5 chars)
+torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dedup size-only
+
+# Dry run to preview what would be copied
+torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dry-run
+```
+
+The `--copy-empty-dst` option is useful when:
+- You have completed downloads in a source directory
+- Target directory has pre-allocated files (all null bytes) with similar names
+- You want to copy complete data to replace empty files
+
+**Fuzzy Matching Examples:**
+- `"video.mkv"` ↔ `"vido.mkv"` ✅ (88.9% similarity)
+- `"movie_2024.mp4"` ↔ `"movie_2025.mp4"` ✅ (93.3% similarity)
+- `"test_file.txt"` ↔ `"test_fle.txt"` ✅ (92.3% similarity)
+
+**Requirements for Copy:**
+- Files must have identical size
+- Destination must contain only null bytes (empty pre-allocated space)
+- Source must contain actual data (non-null bytes)
+- Filenames must match exactly OR have ≥80% similarity (min 5 characters)
+- Must use `--src` to specify source directories (read-only)
+- Works best with `--dedup size-only` for fuzzy filename matching
 
 ## Performance
 

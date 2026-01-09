@@ -192,6 +192,7 @@ fn process_group(
         src_dirs,
         dry_run,
         args.no_mmap,
+        args.copy_empty_dst,
     )?;
 
     // Update cache

@@ -52,6 +52,10 @@ pub struct Args {
     #[arg(long = "exclude")]
     pub exclude: Vec<PathBuf>,
 
+    /// Copy source to destination when filename and size match, destination is empty (\0 only), and source contains data
+    #[arg(long)]
+    pub copy_empty_dst: bool,
+
     /// Root directories to search for files
     #[arg(required = true)]
     pub root_dirs: Vec<PathBuf>,
