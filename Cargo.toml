@@ -2,7 +2,7 @@
 name = "torrent-combine"
 version = "0.1.2"
 edition = "2021"
-rust-version = "1.80.0"
+rust-version = "1.81.0"
 repository = "https://github.com/mason-larobina/torrent-combine"
 readme = "README.md"
 authors = ["Mason Larobina <mason.larobina@pm.me>"]
