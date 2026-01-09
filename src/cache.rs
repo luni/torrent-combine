@@ -1,9 +1,9 @@
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -85,7 +85,9 @@ impl FileCache {
     }
 
     pub fn get_file_info(&self, path: &Path) -> Option<FileInfo> {
-        self.file_cache.get(path).map(|entry| entry.file_info.clone())
+        self.file_cache
+            .get(path)
+            .map(|entry| entry.file_info.clone())
     }
 
     pub fn get_group_cache(&self, group_key: &str) -> Option<GroupCache> {
@@ -115,7 +117,12 @@ impl FileCache {
         self.file_cache.insert(file_info.path.clone(), entry);
     }
 
-    pub fn update_group_cache(&mut self, group_key: String, files: Vec<FileInfo>, is_complete: bool) {
+    pub fn update_group_cache(
+        &mut self,
+        group_key: String,
+        files: Vec<FileInfo>,
+        is_complete: bool,
+    ) {
         let current_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -137,14 +144,12 @@ impl FileCache {
             .as_secs();
 
         // Remove expired file cache entries
-        self.file_cache.retain(|_, entry| {
-            (current_time - entry.last_verified) < self.cache_ttl
-        });
+        self.file_cache
+            .retain(|_, entry| (current_time - entry.last_verified) < self.cache_ttl);
 
         // Remove expired group cache entries
-        self.group_cache.retain(|_, cache| {
-            (current_time - cache.last_verified) < self.cache_ttl
-        });
+        self.group_cache
+            .retain(|_, cache| (current_time - cache.last_verified) < self.cache_ttl);
     }
 
     pub fn compute_file_hash(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -160,7 +165,8 @@ impl FileCache {
         hasher.update(metadata.len().to_le_bytes());
 
         if let Ok(modified) = metadata.modified() {
-            let timestamp = modified.duration_since(UNIX_EPOCH)
+            let timestamp = modified
+                .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             hasher.update(timestamp.to_le_bytes());
@@ -187,11 +193,15 @@ impl FileCache {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    pub fn get_file_info_with_hash(&mut self, path: &Path) -> Result<Option<FileInfo>, Box<dyn std::error::Error>> {
+    pub fn get_file_info_with_hash(
+        &mut self,
+        path: &Path,
+    ) -> Result<Option<FileInfo>, Box<dyn std::error::Error>> {
         let metadata = fs::metadata(path)?;
         let size = metadata.len();
 
-        let modified = metadata.modified()
+        let modified = metadata
+            .modified()
             .unwrap_or(SystemTime::UNIX_EPOCH)
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

@@ -3,16 +3,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
+use rayon::prelude::*;
 
-pub mod merger;
 pub mod cache;
+pub mod merger;
 
 // Global cleanup registry for temporary files
 static TEMP_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -49,21 +49,31 @@ fn parse_file_size(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
 
     if s.ends_with("kb") {
-        let num: f64 = s.trim_end_matches("kb").parse()
+        let num: f64 = s
+            .trim_end_matches("kb")
+            .parse()
             .map_err(|_| format!("Invalid number in '{}'", s))?;
         Ok((num * 1024.0) as u64)
     } else if s.ends_with("mb") {
-        let num: f64 = s.trim_end_matches("mb").parse()
+        let num: f64 = s
+            .trim_end_matches("mb")
+            .parse()
             .map_err(|_| format!("Invalid number in '{}'", s))?;
         Ok((num * 1024.0 * 1024.0) as u64)
     } else if s.ends_with("gb") {
-        let num: f64 = s.trim_end_matches("gb").parse()
+        let num: f64 = s
+            .trim_end_matches("gb")
+            .parse()
             .map_err(|_| format!("Invalid number in '{}'", s))?;
         Ok((num * 1024.0 * 1024.0 * 1024.0) as u64)
     } else {
         // Assume bytes if no suffix
-        s.parse()
-            .map_err(|_| format!("Invalid file size '{}'. Use format like '10MB', '1GB', or '1048576'", s))
+        s.parse().map_err(|_| {
+            format!(
+                "Invalid file size '{}'. Use format like '10MB', '1GB', or '1048576'",
+                s
+            )
+        })
     }
 }
 
@@ -88,9 +98,15 @@ enum GroupKey {
 #[command(name = "torrent-combine")]
 struct Args {
     root_dir: PathBuf,
-    #[arg(long, help = "Specify source directories to treat as read-only (can be used multiple times)")]
+    #[arg(
+        long,
+        help = "Specify source directories to treat as read-only (can be used multiple times)"
+    )]
     src_dirs: Vec<PathBuf>,
-    #[arg(long, help = "Exclude directories from scanning (can be used multiple times)")]
+    #[arg(
+        long,
+        help = "Exclude directories from scanning (can be used multiple times)"
+    )]
     exclude: Vec<PathBuf>,
     #[arg(long, value_parser = parse_file_size, help = "Minimum file size to process (e.g., '10MB', '1GB', '1048576'). Default: 1MB")]
     min_file_size: Option<u64>,
@@ -98,15 +114,25 @@ struct Args {
     replace: bool,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, value_delimiter = ',', help = "File extensions to include (e.g., 'mkv,mp4,avi'). Default: all files")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "File extensions to include (e.g., 'mkv,mp4,avi'). Default: all files"
+    )]
     extensions: Vec<String>,
     #[arg(long)]
     num_threads: Option<usize>,
     #[arg(long, value_enum, default_value = "filename-and-size")]
     dedup_mode: DedupKey,
-    #[arg(long, help = "Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)")]
+    #[arg(
+        long,
+        help = "Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)"
+    )]
     no_mmap: bool,
-    #[arg(long, help = "Enable verbose logging (may interfere with progress bar)")]
+    #[arg(
+        long,
+        help = "Enable verbose logging (may interfere with progress bar)"
+    )]
     verbose: bool,
     #[arg(long, help = "Disable caching (slower but uses less disk space)")]
     no_cache: bool,
@@ -114,9 +140,14 @@ struct Args {
     clear_cache: bool,
 }
 
-fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String], exclude_dirs: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+fn collect_large_files(
+    dirs: &[PathBuf],
+    min_size: u64,
+    extensions: &[String],
+    exclude_dirs: &[PathBuf],
+) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut dirs_to_process: Vec<PathBuf> = dirs.iter().cloned().collect();
+    let mut dirs_to_process: Vec<PathBuf> = dirs.to_vec();
     let extensions: Vec<String> = extensions.iter().map(|ext| ext.to_lowercase()).collect();
 
     // Convert exclude dirs to canonical paths for comparison
@@ -124,18 +155,26 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String], e
     for exclude_dir in exclude_dirs {
         match exclude_dir.canonicalize() {
             Ok(canonical) => canonical_exclude_dirs.push(canonical),
-            Err(e) => log::warn!("Failed to canonicalize exclude directory {:?}: {}", exclude_dir, e),
+            Err(e) => log::warn!(
+                "Failed to canonicalize exclude directory {:?}: {}",
+                exclude_dir,
+                e
+            ),
         }
     }
 
     while let Some(current_dir) = dirs_to_process.pop() {
         // Check if current directory should be excluded
         let should_exclude = match current_dir.canonicalize() {
-            Ok(canonical_current) => canonical_exclude_dirs.iter().any(|exclude| {
-                canonical_current.starts_with(exclude)
-            }),
+            Ok(canonical_current) => canonical_exclude_dirs
+                .iter()
+                .any(|exclude| canonical_current.starts_with(exclude)),
             Err(e) => {
-                log::warn!("Failed to canonicalize current directory {:?}: {}", current_dir, e);
+                log::warn!(
+                    "Failed to canonicalize current directory {:?}: {}",
+                    current_dir,
+                    e
+                );
                 false
             }
         };
@@ -175,10 +214,13 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String], e
                             } else if let Ok(metadata) = fs::metadata(&path) {
                                 if metadata.len() > min_size {
                                     // Check extension filter
-                                    if extensions.is_empty() || path.extension()
-                                        .and_then(|ext| ext.to_str())
-                                        .map(|ext| extensions.contains(&ext.to_lowercase()))
-                                        .unwrap_or(false) {
+                                    if extensions.is_empty()
+                                        || path
+                                            .extension()
+                                            .and_then(|ext| ext.to_str())
+                                            .map(|ext| extensions.contains(&ext.to_lowercase()))
+                                            .unwrap_or(false)
+                                    {
                                         files.push(path);
                                     }
                                 }
@@ -187,7 +229,11 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String], e
                             }
                         }
                         Err(e) => {
-                            log::warn!("Failed to read directory entry: {:?} (error: {})", current_dir, e);
+                            log::warn!(
+                                "Failed to read directory entry: {:?} (error: {})",
+                                current_dir,
+                                e
+                            );
                         }
                     }
                 }
@@ -235,7 +281,7 @@ fn main() -> io::Result<()> {
         log::error!("Root directory does not exist: {:?}", args.root_dir);
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Root directory does not exist: {:?}", args.root_dir)
+            format!("Root directory does not exist: {:?}", args.root_dir),
         ));
     }
 
@@ -243,7 +289,7 @@ fn main() -> io::Result<()> {
         log::error!("Root path is not a directory: {:?}", args.root_dir);
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Root path is not a directory: {:?}", args.root_dir)
+            format!("Root path is not a directory: {:?}", args.root_dir),
         ));
     }
 
@@ -271,7 +317,11 @@ fn main() -> io::Result<()> {
     let mut all_dirs = vec![args.root_dir.clone()];
     all_dirs.extend(args.src_dirs.clone());
     let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
-    log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
+    log::info!(
+        "Minimum file size: {} bytes ({} MB)",
+        min_file_size,
+        min_file_size / 1_048_576
+    );
 
     // Initialize cache (simplified approach - only read cache, don't update during processing)
     let cache = if !args.no_cache {
@@ -299,7 +349,7 @@ fn main() -> io::Result<()> {
     discovery_pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} {msg}")
-            .expect("Failed to set discovery progress bar template")
+            .expect("Failed to set discovery progress bar template"),
     );
     discovery_pb.set_message("Scanning for large files...");
     discovery_pb.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -354,7 +404,7 @@ fn main() -> io::Result<()> {
                     }
                 }
             };
-            groups.entry(key).or_insert(Vec::new()).push(file);
+            groups.entry(key).or_default().push(file);
         } else {
             log::warn!("Failed to read metadata for file: {:?}", file);
         }
@@ -412,23 +462,33 @@ fn main() -> io::Result<()> {
                             let current_metadata = match fs::metadata(&cached_file.path) {
                                 Ok(meta) => meta,
                                 Err(_) => {
-                                    log::warn!("Failed to read metadata for: {:?}", cached_file.path);
+                                    log::warn!(
+                                        "Failed to read metadata for: {:?}",
+                                        cached_file.path
+                                    );
                                     files_changed = true;
                                     break;
                                 }
                             };
                             let current_size = current_metadata.len();
-                            let current_modified = current_metadata.modified()
+                            let current_modified = current_metadata
+                                .modified()
                                 .unwrap_or(SystemTime::UNIX_EPOCH)
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
 
-                            if cached_file.size != current_size ||
-                               cached_file.modified != current_modified {
-                                log::debug!("File changed: {:?} (size: {}->{}, modified: {}->{})",
-                                          cached_file.path, cached_file.size, current_size,
-                                          cached_file.modified, current_modified);
+                            if cached_file.size != current_size
+                                || cached_file.modified != current_modified
+                            {
+                                log::debug!(
+                                    "File changed: {:?} (size: {}->{}, modified: {}->{})",
+                                    cached_file.path,
+                                    cached_file.size,
+                                    current_size,
+                                    cached_file.modified,
+                                    current_modified
+                                );
                                 files_changed = true;
                                 break;
                             }
@@ -436,13 +496,17 @@ fn main() -> io::Result<()> {
 
                         if !files_changed {
                             // Use cached result
-                            let processed_count = groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
+                            let processed_count =
+                                groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
                             pb_cloned.set_position(processed_count as u64);
 
                             if cached_group.is_complete {
                                 skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
                                 if args.verbose {
-                                    log::info!("Group '{}' skipped (cached - all files complete)", group_name);
+                                    log::info!(
+                                        "Group '{}' skipped (cached - all files complete)",
+                                        group_name
+                                    );
                                 }
                             } else {
                                 merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
@@ -465,9 +529,17 @@ fn main() -> io::Result<()> {
                 return;
             }
 
-            match merger::process_group_with_dry_run(&paths, &group_name, args.replace, &args.src_dirs, args.dry_run, args.no_mmap) {
+            match merger::process_group_with_dry_run(
+                &paths,
+                &group_name,
+                args.replace,
+                &args.src_dirs,
+                args.dry_run,
+                args.no_mmap,
+            ) {
                 Ok(stats) => {
-                    let processed_count = groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
+                    let processed_count =
+                        groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
                     pb_cloned.set_position(processed_count as u64);
 
                     match stats.status {
@@ -504,28 +576,16 @@ fn main() -> io::Result<()> {
                         merger::GroupStatus::Skipped => {
                             skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
                             if args.verbose {
-                                log::info!(
-                                    "Group '{}' skipped (all files complete)",
-                                    group_name
-                                );
+                                log::info!("Group '{}' skipped (all files complete)", group_name);
                             } else {
-                                log::debug!(
-                                    "Group '{}' skipped (all files complete)",
-                                    group_name
-                                );
+                                log::debug!("Group '{}' skipped (all files complete)", group_name);
                             }
                         }
                         merger::GroupStatus::Failed => {
                             if args.verbose {
-                                log::warn!(
-                                    "Group '{}' failed sanity check",
-                                    group_name
-                                );
+                                log::warn!("Group '{}' failed sanity check", group_name);
                             } else {
-                                log::debug!(
-                                    "Group '{}' failed sanity check",
-                                    group_name
-                                );
+                                log::debug!("Group '{}' failed sanity check", group_name);
                             }
                         }
                     }
@@ -599,7 +659,10 @@ mod tests {
             "FilenameAndSize"
         );
         assert_eq!(format!("{:?}", DedupKey::SizeOnly), "SizeOnly");
-        assert_eq!(format!("{:?}", DedupKey::ExtensionAndSize), "ExtensionAndSize");
+        assert_eq!(
+            format!("{:?}", DedupKey::ExtensionAndSize),
+            "ExtensionAndSize"
+        );
     }
 
     #[test]
@@ -632,7 +695,7 @@ mod tests {
 
         let key1_dup = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
         map.entry(key1_dup)
-            .or_insert(Vec::new())
+            .or_default()
             .push(PathBuf::from("/path3"));
 
         assert_eq!(map.len(), 2);
@@ -739,7 +802,7 @@ mod tests {
         use std::ffi::OsString;
 
         // This simulates command line parsing with multiple --src-dirs
-        let _args = vec![
+        let _args = [
             OsString::from("torrent-combine"),
             OsString::from("/test"),
             OsString::from("--src-dirs"),
@@ -749,10 +812,7 @@ mod tests {
         ];
 
         // The actual parsing is handled by clap, but we can test the data structure
-        let src_dirs = vec![
-            PathBuf::from("/readonly1"),
-            PathBuf::from("/readonly2"),
-        ];
+        let src_dirs = [PathBuf::from("/readonly1"), PathBuf::from("/readonly2")];
 
         assert_eq!(src_dirs.len(), 2);
         assert_eq!(src_dirs[0], PathBuf::from("/readonly1"));
@@ -762,7 +822,7 @@ mod tests {
     #[test]
     fn test_multiple_exclude_parsing() {
         // Test that exclude can accept multiple values
-        let exclude_dirs = vec![
+        let exclude_dirs = [
             PathBuf::from("/temp"),
             PathBuf::from("/cache"),
             PathBuf::from("/incomplete"),
@@ -893,7 +953,7 @@ mod tests {
         cleanup_temp_files();
 
         // Test passes if no panic occurs
-        assert!(true);
+        // assert!(true); // Removed - optimized out
     }
 
     #[test]
@@ -921,7 +981,7 @@ mod tests {
 
         // Test cleanup
         cache.cleanup_expired();
-        assert!(true); // Should not panic
+        // assert!(true); // Removed - optimized out
     }
 
     #[test]
@@ -949,7 +1009,7 @@ mod tests {
 
         // Test cleanup
         cache.cleanup_expired();
-        assert!(true); // Should not panic
+        // assert!(true); // Removed - optimized out
     }
 
     #[test]
@@ -995,9 +1055,9 @@ mod tests {
         for mode in modes {
             // Test that each variant can be created and compared
             match mode {
-                DedupKey::FilenameAndSize => assert!(true),
-                DedupKey::SizeOnly => assert!(true),
-                DedupKey::ExtensionAndSize => assert!(true),
+                DedupKey::FilenameAndSize => {}  // Test passes if variant exists
+                DedupKey::SizeOnly => {}         // Test passes if variant exists
+                DedupKey::ExtensionAndSize => {} // Test passes if variant exists
             }
         }
     }

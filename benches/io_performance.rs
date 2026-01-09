@@ -1,8 +1,10 @@
+#![allow(clippy::needless_range_loop)]
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use memmap2::MmapOptions;
 use std::fs;
 use std::io::{Read, Write};
 use tempfile::tempdir;
-use memmap2::MmapOptions;
 
 fn create_test_files(size: usize) -> (tempfile::TempDir, Vec<std::path::PathBuf>) {
     let dir = tempdir().unwrap();
@@ -16,9 +18,27 @@ fn create_test_files(size: usize) -> (tempfile::TempDir, Vec<std::path::PathBuf>
         let mut data = vec![0u8; size];
         for j in 0..size {
             data[j] = match i {
-                0 => if j % 3 == 0 { 1 } else { 0 },
-                1 => if j % 5 == 0 { 2 } else { 0 },
-                2 => if j % 7 == 0 { 4 } else { 0 },
+                0 => {
+                    if j % 3 == 0 {
+                        1
+                    } else {
+                        0
+                    }
+                }
+                1 => {
+                    if j % 5 == 0 {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                2 => {
+                    if j % 7 == 0 {
+                        4
+                    } else {
+                        0
+                    }
+                }
                 _ => 0,
             };
         }
