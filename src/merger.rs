@@ -530,10 +530,10 @@ pub fn check_sanity_and_completes(
                 },
                 Err(e) => {
                     error!("Failed to open file {:?} for memory mapping: {}", p, e);
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to open file for memory mapping {:?}: {}", p, e),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "Failed to open file for memory mapping {:?}: {}",
+                        p, e
+                    )));
                 }
             }
         }
@@ -555,10 +555,7 @@ pub fn check_sanity_and_completes(
                     chunk_size,
                     mmaps[0].len()
                 );
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Memory mapping bounds exceeded",
-                ));
+                return Err(io::Error::other("Memory mapping bounds exceeded"));
             }
 
             // Copy first file's chunk to or_chunk
@@ -597,10 +594,10 @@ pub fn check_sanity_and_completes(
                 Ok(file) => readers.push(BufReader::new(file)),
                 Err(e) => {
                     error!("Failed to open file {:?} for reading: {}", p, e);
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Failed to open file for reading {:?}: {}", p, e),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "Failed to open file for reading {:?}: {}",
+                        p, e
+                    )));
                 }
             }
         }
@@ -623,10 +620,10 @@ pub fn check_sanity_and_completes(
                             "Failed to read from file {} at offset {}: {}",
                             i, processed, e
                         );
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("Failed to read from file at offset {}: {}", processed, e),
-                        ));
+                        return Err(io::Error::other(format!(
+                            "Failed to read from file at offset {}: {}",
+                            processed, e
+                        )));
                     }
                 }
             }
