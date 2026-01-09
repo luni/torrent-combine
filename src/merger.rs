@@ -237,37 +237,45 @@ pub fn process_group_with_dry_run(
         basename
     );
 
-    // Handle copy_empty_dst logic
-    if copy_empty_dst && paths.len() == 2 {
-        let src_dst_pair = if filter.is_in_src_dir(&paths[0]) && !filter.is_in_src_dir(&paths[1]) {
-            Some((&paths[0], &paths[1]))
-        } else if !filter.is_in_src_dir(&paths[0]) && filter.is_in_src_dir(&paths[1]) {
-            Some((&paths[1], &paths[0]))
-        } else {
-            None
-        };
+    // Handle copy_empty_dst logic - check before normal processing
+    if copy_empty_dst && paths.len() >= 2 {
+        // Separate sources and destinations
+        let mut sources = Vec::new();
+        let mut destinations = Vec::new();
 
-        if let Some((src_path, dst_path)) = src_dst_pair {
-            // Check if filenames match (exact or fuzzy)
-            if let (Some(src_filename), Some(dst_filename)) =
-                (src_path.file_name(), dst_path.file_name())
-            {
-                let src_filename_str = src_filename.to_string_lossy();
+        for path in paths.iter() {
+            if filter.is_in_src_dir(path) {
+                sources.push(path);
+            } else {
+                destinations.push(path);
+            }
+        }
+
+        // Process each destination to find matching sources
+        let mut successful_copies = Vec::new();
+        let mut total_bytes_copied = 0u64;
+
+        for dst_path in &destinations {
+            if let Some(dst_filename) = dst_path.file_name() {
                 let dst_filename_str = dst_filename.to_string_lossy();
 
-                if src_filename_str == dst_filename_str
-                    || filenames_fuzzy_match(&src_filename_str, &dst_filename_str)
-                {
-                    let match_type = if src_filename_str == dst_filename_str {
-                        "exact"
-                    } else {
-                        "fuzzy"
-                    };
-                    info!(
-                        "Filename {} match: '{}' vs '{}'",
-                        match_type, src_filename_str, dst_filename_str
-                    );
+                // Find matching sources (exact or fuzzy)
+                let mut matching_sources = Vec::new();
 
+                for src_path in &sources {
+                    if let Some(src_filename) = src_path.file_name() {
+                        let src_filename_str = src_filename.to_string_lossy();
+
+                        if src_filename_str == dst_filename_str
+                            || filenames_fuzzy_match(&src_filename_str, &dst_filename_str)
+                        {
+                            matching_sources.push(src_path);
+                        }
+                    }
+                }
+
+                // Process each matching source
+                for src_path in &matching_sources {
                     // Check if sizes match
                     if let (Ok(src_metadata), Ok(dst_metadata)) =
                         (fs::metadata(src_path), fs::metadata(dst_path))
@@ -278,25 +286,49 @@ pub fn process_group_with_dry_run(
                                 (is_file_all_nulls(dst_path), file_has_data(src_path))
                             {
                                 if dst_is_nulls && src_has_data {
+                                    let match_type = if src_path.file_name() == dst_path.file_name() {
+                                        "exact"
+                                    } else {
+                                        "fuzzy"
+                                    };
+
+                                    info!(
+                                        "Filename {} match: '{}' vs '{}'",
+                                        match_type,
+                                        src_path.file_name().unwrap_or_default().to_string_lossy(),
+                                        dst_filename_str
+                                    );
+
                                     info!(
                                         "Copying source to destination: {:?} -> {:?}",
                                         src_path, dst_path
                                     );
+
                                     if !dry_run {
                                         fs::copy(src_path, dst_path)?;
                                     }
-                                    return Ok(GroupStats {
-                                        status: GroupStatus::Merged,
-                                        processing_time: start_time.elapsed(),
-                                        bytes_processed: src_metadata.len(),
-                                        merged_files: vec![dst_path.clone()],
-                                    });
+
+                                    successful_copies.push(dst_path.to_path_buf());
+                                    total_bytes_copied += src_metadata.len();
+
+                                    // Break after first successful copy per destination
+                                    break;
                                 }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // If we made successful copies, return early with stats
+        if !successful_copies.is_empty() {
+            return Ok(GroupStats {
+                status: GroupStatus::Merged,
+                processing_time: start_time.elapsed(),
+                bytes_processed: total_bytes_copied,
+                merged_files: successful_copies,
+            });
         }
     }
 
@@ -1541,6 +1573,51 @@ mod tests {
         assert_eq!(levenshtein_distance("ab", "ac"), 1);
         assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
         assert_eq!(levenshtein_distance("flaw", "lawn"), 2);
+    }
+
+    #[test]
+    fn test_copy_empty_dst_multiple_sources() -> io::Result<()> {
+        let temp_dir = tempdir()?;
+
+        // Create source directory (read-only)
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir(&src_dir)?;
+
+        // Create multiple source files with same name and same size but different content
+        let src_subdir1 = src_dir.join("src1");
+        let src_subdir2 = src_dir.join("src2");
+        let src_subdir3 = src_dir.join("src3");
+        fs::create_dir(&src_subdir1)?;
+        fs::create_dir(&src_subdir2)?;
+        fs::create_dir(&src_subdir3)?;
+
+        let src_file1 = src_subdir1.join("test.bin");
+        let src_file2 = src_subdir2.join("test.bin");
+        let src_file3 = src_subdir3.join("test.bin");
+
+        fs::write(&src_file1, b"good_dat")?;
+        fs::write(&src_file2, b"other_da")?;
+        fs::write(&src_file3, b"more_dat")?;
+
+        // Create destination file (empty/nulls) - same size as sources
+        let target_dir = temp_dir.path().join("target");
+        fs::create_dir(&target_dir)?;
+        let target_file = target_dir.join("test.bin");
+        fs::write(&target_file, b"\0\0\0\0\0\0\0\0")?;
+
+        let paths = vec![src_file1.clone(), src_file2.clone(), src_file3.clone(), target_file.clone()];
+        let src_dirs = vec![src_dir.clone()];
+
+        // Test with copy_empty_dst enabled - should handle multiple sources
+        let stats =
+            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true)?;
+
+        // Should have merged successfully
+        assert!(matches!(stats.status, GroupStatus::Merged));
+        assert_eq!(stats.merged_files.len(), 1);
+        assert_eq!(stats.bytes_processed, 8);
+
+        Ok(())
     }
 
     #[test]

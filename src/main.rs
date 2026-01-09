@@ -138,12 +138,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut total_merged = 0;
     let mut total_skipped = 0;
     let mut total_failed = 0;
+    let mut all_merged_files = Vec::new();
 
     for result in results {
         match result {
             Ok(stats) => {
                 if !stats.merged_files.is_empty() {
                     total_merged += stats.merged_files.len();
+                    all_merged_files.extend(stats.merged_files.clone());
                     println!("Merged {} files for group", stats.merged_files.len());
                 } else {
                     total_skipped += 1;
@@ -160,6 +162,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  Merged: {} files", total_merged);
     println!("  Skipped: {} groups", total_skipped);
     println!("  Failed: {} groups", total_failed);
+
+    if !all_merged_files.is_empty() {
+        println!("\nMerged files:");
+        for merged_file in &all_merged_files {
+            println!("  {}", merged_file.display());
+        }
+    }
 
     // Cleanup
     cleanup_temp_files();

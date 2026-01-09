@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Crates.io](https://img.shields.io/crates/v/torrent-combine.svg)](https://crates.io/crates/torrent-combine)
 
-A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, robust error handling, and smart copy functionality with fuzzy filename matching.
+A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, robust error handling, smart copy functionality with fuzzy filename matching, multiple source support, and comprehensive merged files listing.
 
 ## Description
 
@@ -16,6 +16,8 @@ This tool scans a root directory recursively for files larger than 1MB (targetin
 - **Merge**: Bitwise OR of contents to combine downloaded chunks
 - **Output**: Creates `.merged` files for incomplete originals (unless `--replace` is used)
 - **Smart Copy**: Copy complete source files to empty destination files with fuzzy filename matching
+- **Multiple Sources**: Handle multiple source directories for the same destination file
+- **Merged Files Listing**: Complete summary of all processed files displayed after completion
 - **Caching**: Intelligent file verification caching for faster subsequent runs
 - **Progress Bars**: Real-time progress feedback for file scanning and processing
 - **Error Handling**: Graceful handling of malformed paths, permission issues, and filesystem errors
@@ -35,6 +37,8 @@ For details, see [DESIGN.md](DESIGN.md).
 - **📁 Extension Filtering**: Process only specific file types
 - **📋 Smart Copy**: Copy source to empty destination files with fuzzy filename matching
 - **🔍 Fuzzy Matching**: Intelligent filename matching (80% similarity, min 5 characters)
+- **📝 Merged Files Listing**: Complete list of all merged files displayed after processing
+- **🔄 Multiple Source Support**: Handle multiple sources for the same file in copy operations
 
 ## Installation
 
@@ -219,14 +223,18 @@ torrent-combine /downloads --src /complete/torrents --copy-empty-dst
 # Copy with fuzzy filename matching (80% similarity, min 5 chars)
 torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dedup size-only
 
+# Multiple source directories supported
+torrent-combine /downloads --src /complete/torrents --src /backup/torrents --copy-empty-dst
+
 # Dry run to preview what would be copied
 torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dry-run
 ```
 
 The `--copy-empty-dst` option is useful when:
-- You have completed downloads in a source directory
+- You have completed downloads in source directories
 - Target directory has pre-allocated files (all null bytes) with similar names
 - You want to copy complete data to replace empty files
+- You have multiple sources for the same file (e.g., multiple torrent directories)
 
 **Fuzzy Matching Examples:**
 - `"video.mkv"` ↔ `"vido.mkv"` ✅ (88.9% similarity)
@@ -240,6 +248,7 @@ The `--copy-empty-dst` option is useful when:
 - Filenames must match exactly OR have ≥80% similarity (min 5 characters)
 - Must use `--src` to specify source directories (read-only)
 - Works best with `--dedup size-only` for fuzzy filename matching
+- Supports multiple sources for the same destination file
 
 ## Performance
 
@@ -306,6 +315,25 @@ Processing complete
 - **Discovery phase**: Spinner animation while scanning directories
 - **Processing phase**: Progress bar with current/total count and ETA
 - **Cache hits**: Shows "cached" messages when using cached results
+
+## Output Summary
+
+After processing completes, the tool displays a comprehensive summary:
+
+```
+Summary:
+  Merged: 2 files
+  Skipped: 0 groups
+  Failed: 0 groups
+
+Merged files:
+  /downloads/movie1.mkv.merged
+  /downloads/movie2.mkv.merged
+```
+
+- **Summary section**: Shows total merged files, skipped groups, and failed groups
+- **Merged files section**: Lists all files that were created or modified during processing
+- **Conditional display**: Only shows merged files section when there are actual merged files
 
 ## Contributing
 
