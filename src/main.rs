@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use log::error;
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -71,6 +70,8 @@ struct Args {
     dedup_mode: DedupKey,
     #[arg(long, help = "Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)")]
     no_mmap: bool,
+    #[arg(long, help = "Enable verbose logging (may interfere with progress bar)")]
+    verbose: bool,
 }
 
 fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -> io::Result<Vec<PathBuf>> {
@@ -139,12 +140,25 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -
 }
 
 fn main() -> io::Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe { std::env::set_var("RUST_LOG", "info") };
-    }
-    env_logger::init();
-
     let args = Args::parse();
+
+    // Configure logging based on verbose flag
+    if args.verbose {
+        if std::env::var("RUST_LOG").is_err() {
+            unsafe { std::env::set_var("RUST_LOG", "info") };
+        }
+        env_logger::Builder::from_default_env()
+            .target(env_logger::Target::Stderr)
+            .init();
+    } else {
+        if std::env::var("RUST_LOG").is_err() {
+            unsafe { std::env::set_var("RUST_LOG", "warn") }; // Reduce log level to avoid interfering with progress bar
+        }
+        env_logger::Builder::from_default_env()
+            .target(env_logger::Target::Stderr) // Send logs to stderr, progress bar uses stdout
+            .init();
+    }
+
     if args.dry_run {
         log::info!("DRY-RUN MODE: No files will be modified. Showing what would happen.");
     }
@@ -200,6 +214,7 @@ fn main() -> io::Result<()> {
             .expect("Failed to set discovery progress bar template")
     );
     discovery_pb.set_message("Scanning for large files...");
+    discovery_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let files = collect_large_files(&all_dirs, min_file_size, &args.extensions)?;
     discovery_pb.finish_with_message("File scanning complete");
@@ -273,6 +288,7 @@ fn main() -> io::Result<()> {
             .progress_chars("#>-")
     );
     pb.set_message("Processing groups");
+    pb.enable_steady_tick(std::time::Duration::from_millis(500));
 
     let groups_processed = Arc::new(AtomicUsize::new(0));
     let merged_groups_count = Arc::new(AtomicUsize::new(0));
@@ -300,34 +316,62 @@ fn main() -> io::Result<()> {
                             merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
                             let mb_per_sec = (stats.bytes_processed as f64 / 1_048_576.0)
                                 / stats.processing_time.as_secs_f64();
-                            log::info!(
-                                "Group '{}' merged at {:.2} MB/s",
-                                group_name,
-                                mb_per_sec
-                            );
-                            if !stats.merged_files.is_empty() {
-                                for file in stats.merged_files {
-                                    log::info!("  -> Created merged file: {}", file.display());
+                            // Only log at info level if verbose, otherwise debug to avoid interfering with progress bar
+                            if args.verbose {
+                                log::info!(
+                                    "Group '{}' merged at {:.2} MB/s",
+                                    group_name,
+                                    mb_per_sec
+                                );
+                                if !stats.merged_files.is_empty() {
+                                    for file in stats.merged_files {
+                                        log::info!("  -> Created merged file: {}", file.display());
+                                    }
+                                }
+                            } else {
+                                log::debug!(
+                                    "Group '{}' merged at {:.2} MB/s",
+                                    group_name,
+                                    mb_per_sec
+                                );
+                                if !stats.merged_files.is_empty() {
+                                    for file in stats.merged_files {
+                                        log::debug!("  -> Created merged file: {}", file.display());
+                                    }
                                 }
                             }
                         }
                         merger::GroupStatus::Skipped => {
                             skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
-                            log::info!(
-                                "Group '{}' skipped (all files complete)",
-                                group_name
-                            );
+                            if args.verbose {
+                                log::info!(
+                                    "Group '{}' skipped (all files complete)",
+                                    group_name
+                                );
+                            } else {
+                                log::debug!(
+                                    "Group '{}' skipped (all files complete)",
+                                    group_name
+                                );
+                            }
                         }
                         merger::GroupStatus::Failed => {
-                            log::warn!(
-                                "Group '{}' failed sanity check",
-                                group_name
-                            );
+                            if args.verbose {
+                                log::warn!(
+                                    "Group '{}' failed sanity check",
+                                    group_name
+                                );
+                            } else {
+                                log::debug!(
+                                    "Group '{}' failed sanity check",
+                                    group_name
+                                );
+                            }
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Error processing group {}: {:?}", group_name, e);
+                    log::error!("Error processing group {}: {:?}", group_name, e);
                 }
             }
         });
