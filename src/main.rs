@@ -29,6 +29,8 @@ enum GroupKey {
 #[command(name = "torrent-combine")]
 struct Args {
     root_dir: PathBuf,
+    #[arg(long, value_delimiter = ',')]
+    src_dirs: Vec<PathBuf>,
     #[arg(long)]
     replace: bool,
     #[arg(long)]
@@ -37,16 +39,16 @@ struct Args {
     dedup_mode: DedupKey,
 }
 
-fn collect_large_files(dir: &PathBuf) -> io::Result<Vec<PathBuf>> {
+fn collect_large_files(dirs: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    let mut dirs = vec![dir.clone()];
+    let mut dirs_to_process: Vec<PathBuf> = dirs.iter().cloned().collect();
 
-    while let Some(current_dir) = dirs.pop() {
+    while let Some(current_dir) = dirs_to_process.pop() {
         for entry in fs::read_dir(&current_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
-                dirs.push(path);
+                dirs_to_process.push(path);
             } else if let Ok(metadata) = fs::metadata(&path) {
                 if metadata.len() > 1_048_576 {
                     files.push(path);
@@ -66,6 +68,9 @@ fn main() -> io::Result<()> {
 
     let args = Args::parse();
     log::info!("Processing root directory: {:?}", args.root_dir);
+    if !args.src_dirs.is_empty() {
+        log::info!("Source directories: {:?}", args.src_dirs);
+    }
 
     if let Some(num_threads) = args.num_threads {
         rayon::ThreadPoolBuilder::new()
@@ -74,7 +79,9 @@ fn main() -> io::Result<()> {
             .unwrap();
     }
 
-    let files = collect_large_files(&args.root_dir)?;
+    let mut all_dirs = vec![args.root_dir.clone()];
+    all_dirs.extend(args.src_dirs.clone());
+    let files = collect_large_files(&all_dirs)?;
     log::info!("Found {} large files", files.len());
 
     let mut groups: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
@@ -120,7 +127,7 @@ fn main() -> io::Result<()> {
                 GroupKey::SizeOnly(size) => format!("size-{}", size),
             };
 
-            match merger::process_group(&paths, &group_name, args.replace) {
+            match merger::process_group(&paths, &group_name, args.replace, &args.src_dirs) {
                 Ok(stats) => {
                     let processed_count =
                         groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;

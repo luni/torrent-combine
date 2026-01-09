@@ -1,10 +1,25 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use log::error;
 use tempfile::NamedTempFile;
+
+fn is_in_src_dir(path: &Path, src_dirs: &[PathBuf]) -> bool {
+    let canonical_path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    src_dirs.iter().any(|src_dir| {
+        if let Ok(canonical_src) = src_dir.canonicalize() {
+            canonical_path.starts_with(canonical_src)
+        } else {
+            false
+        }
+    })
+}
 
 #[derive(Debug)]
 pub enum GroupStatus {
@@ -21,12 +36,30 @@ pub struct GroupStats {
     pub merged_files: Vec<PathBuf>,
 }
 
-pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool) -> io::Result<GroupStats> {
+pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool, src_dirs: &[PathBuf]) -> io::Result<GroupStats> {
     let start_time = Instant::now();
     log::debug!("Processing paths for group {}: {:?}", basename, paths);
 
-    let bytes_processed = if !paths.is_empty() {
-        fs::metadata(&paths[0])?.len()
+    // Filter out files that are in src directories (read-only)
+    let writable_paths: Vec<PathBuf> = paths.iter()
+        .filter(|path| !is_in_src_dir(path, src_dirs))
+        .cloned()
+        .collect();
+
+    if writable_paths.is_empty() {
+        log::info!("All files in group '{}' are in read-only src directories, skipping", basename);
+        return Ok(GroupStats {
+            status: GroupStatus::Skipped,
+            processing_time: start_time.elapsed(),
+            bytes_processed: 0,
+            merged_files: Vec::new(),
+        });
+    }
+
+    log::info!("Processing {} writable files out of {} total for group '{}'", writable_paths.len(), paths.len(), basename);
+
+    let bytes_processed = if !writable_paths.is_empty() {
+        fs::metadata(&writable_paths[0])?.len()
     } else {
         0
     };
@@ -40,7 +73,7 @@ pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool) -> io::Re
         });
     }
 
-    let res = check_sanity_and_completes(paths)?;
+    let res = check_sanity_and_completes(&writable_paths, src_dirs)?;
 
     if let Some((temp, is_complete)) = res {
         log::info!("Sanity check passed for group {}", basename);
@@ -50,11 +83,25 @@ pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool) -> io::Re
             let mut merged_files = Vec::new();
             for (j, &complete) in is_complete.iter().enumerate() {
                 if !complete {
-                    let path = &paths[j];
+                    let path = &writable_paths[j];
+
+                    // Skip files that are in src directories (read-only)
+                    if is_in_src_dir(path, src_dirs) {
+                        log::info!("Skipping read-only file in src directory: {:?}", path);
+                        continue;
+                    }
+
                     let parent = path.parent().ok_or(io::Error::new(
                         io::ErrorKind::InvalidInput,
                         "No parent directory",
                     ))?;
+
+                    // Additional safety check: ensure parent is not in src dirs
+                    if is_in_src_dir(parent, src_dirs) {
+                        log::info!("Skipping file because parent directory is in src directories: {:?}", parent);
+                        continue;
+                    }
+
                     let local_temp = NamedTempFile::new_in(parent)?;
                     fs::copy(temp.path(), local_temp.path())?;
                     if replace {
@@ -122,7 +169,7 @@ fn check_word_sanity(w: u64, or_w: u64) -> bool {
     true
 }
 
-fn check_sanity_and_completes(paths: &[PathBuf]) -> io::Result<Option<(NamedTempFile, Vec<bool>)>> {
+fn check_sanity_and_completes(paths: &[PathBuf], src_dirs: &[PathBuf]) -> io::Result<Option<(NamedTempFile, Vec<bool>)>> {
     if paths.is_empty() {
         return Ok(None);
     }
@@ -144,9 +191,22 @@ fn check_sanity_and_completes(paths: &[PathBuf]) -> io::Result<Option<(NamedTemp
 
     log::debug!("Checking sanity for {} files of size {}", paths.len(), size);
 
-    let temp_dir = paths[0].parent().ok_or(io::Error::new(
+    // Find a suitable parent directory for temp file (prefer non-src directory)
+    let mut temp_dir = None;
+    for p in paths {
+        if let Some(parent) = p.parent() {
+            if !is_in_src_dir(parent, src_dirs) {
+                temp_dir = Some(parent);
+                break;
+            } else if temp_dir.is_none() {
+                temp_dir = Some(parent);
+            }
+        }
+    }
+
+    let temp_dir = temp_dir.ok_or(io::Error::new(
         io::ErrorKind::InvalidInput,
-        "No parent directory for first path",
+        "No parent directory found for any path",
     ))?;
     let temp = NamedTempFile::new_in(temp_dir)?;
     let file = temp.reopen()?;
@@ -253,7 +313,7 @@ mod tests {
 
         let paths = vec![p1];
 
-        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths)? {
+        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &[])? {
             assert_eq!(is_complete, vec![true]);
             assert_eq!(fs::read(temp.path())?, data);
         } else {
@@ -272,7 +332,7 @@ mod tests {
         fs::write(&p2, vec![4u8, 5])?;
 
         let paths = vec![p1, p2];
-        let res = check_sanity_and_completes(&paths);
+        let res = check_sanity_and_completes(&paths, &[]);
         assert!(res.is_err());
         Ok(())
     }
@@ -287,7 +347,7 @@ mod tests {
         fs::write(&p2, vec![2u8, 0])?;
 
         let paths = vec![p1, p2];
-        let res = check_sanity_and_completes(&paths)?;
+        let res = check_sanity_and_completes(&paths, &[])?;
         assert!(res.is_none());
         Ok(())
     }
@@ -309,7 +369,7 @@ mod tests {
 
         let paths = vec![p1, p2, p3];
 
-        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths)? {
+        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &[])? {
             assert_eq!(is_complete, vec![false, false, true]);
             assert_eq!(fs::read(temp.path())?, vec![1u8, 1, 0]);
         } else {
@@ -334,7 +394,7 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group(&paths, "video.mkv", false)?;
+        let stats = process_group(&paths, "video.mkv", false, &[])?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -358,7 +418,7 @@ mod tests {
         fs::write(&p2, vec![2u8, 0])?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group(&paths, "dummy", false)?;
+        let stats = process_group(&paths, "dummy", false, &[])?;
 
         assert!(matches!(stats.status, GroupStatus::Failed));
 
@@ -381,7 +441,7 @@ mod tests {
         fs::write(&p2, &data)?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group(&paths, "dummy", false)?;
+        let stats = process_group(&paths, "dummy", false, &[])?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
 
@@ -409,7 +469,7 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group(&paths, "video.mkv", true)?;
+        let stats = process_group(&paths, "video.mkv", true, &[])?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
 
@@ -421,6 +481,51 @@ mod tests {
 
         let merged2 = sub2.join("video.mkv.merged");
         assert!(!merged2.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_group_src_dirs_readonly() -> io::Result<()> {
+        let dir = tempdir()?;
+
+        // Create a source directory (read-only)
+        let src_dir = dir.path().join("src");
+        fs::create_dir(&src_dir)?;
+        let src_file = src_dir.join("video.mkv");
+        let mut src_data = vec![4u8, 5, 6];
+        src_data.resize(15 * 1024, 7);
+        fs::write(&src_file, &src_data)?;
+
+        // Create a target directory with different data (incomplete relative to src)
+        let target_dir = dir.path().join("target");
+        fs::create_dir(&target_dir)?;
+        let target_file = target_dir.join("video.mkv");
+        let mut target_data = vec![1u8, 2, 3];
+        target_data.resize(15 * 1024, 0);
+        fs::write(&target_file, &target_data)?;
+
+        // Create another target directory with incomplete data
+        let target2_dir = dir.path().join("target2");
+        fs::create_dir(&target2_dir)?;
+        let target2_file = target2_dir.join("video.mkv");
+        let mut target2_data = vec![0u8, 1, 2];
+        target2_data.resize(15 * 1024, 0);
+        fs::write(&target2_file, &target2_data)?;
+
+        let paths = vec![src_file.clone(), target_file.clone(), target2_file.clone()];
+        let src_dirs = vec![src_dir.clone()];
+        let stats = process_group(&paths, "video.mkv", false, &src_dirs)?;
+
+        // Should fail because target files are incompatible (different non-zero bytes)
+        assert!(matches!(stats.status, GroupStatus::Failed));
+
+        // Source file should remain unchanged
+        assert_eq!(fs::read(&src_file)?, src_data);
+
+        // Source directory should not have any merged files
+        let merged_src = src_dir.join("video.mkv.merged");
+        assert!(!merged_src.exists());
+
         Ok(())
     }
 }
