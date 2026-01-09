@@ -207,16 +207,15 @@ fn process_group(
     }
 
     // Process the group
-    let stats = merger::process_group_with_dry_run(
-        files,
-        group_name,
-        args.replace,
-        src_dirs,
+    let config = merger::ProcessConfig {
+        replace: args.replace,
         dry_run,
-        args.no_mmap,
-        args.copy_empty_dst,
-        args.only_copy_empty,
-    )?;
+        no_mmap: args.no_mmap,
+        copy_empty_dst: args.copy_empty_dst,
+        only_copy_empty: args.only_copy_empty,
+    };
+
+    let stats = merger::process_group_with_dry_run(files, group_name, config, src_dirs)?;
 
     // Update cache
     if !args.no_cache && !dry_run {
