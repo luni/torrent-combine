@@ -8,6 +8,9 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   audit:
     name: Security Audit
@@ -24,3 +27,60 @@ jobs:
       uses: actions-rs/audit-check@v1
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Check for vulnerable GitHub Actions
+      run: |
+        echo "Checking for vulnerable GitHub Actions..."
+
+        # Check for known vulnerable actions
+        python3 << 'EOF'
+        import yaml
+        import os
+        import sys
+
+        vulnerable_actions = {
+            'dawidd6/action-download-artifact': {
+                'fixed_version': 'v4',
+                'vulnerability': 'Artifact poisoning vulnerability',
+                'cve': 'CVE-2024-43353'
+            }
+        }
+
+        issues_found = []
+
+        # Check all workflow files
+        for root, dirs, files in os.walk('.github/workflows'):
+            for file in files:
+                if file.endswith('.yml') or file.endswith('.yaml'):
+                    workflow_path = os.path.join(root, file)
+                    try:
+                        with open(workflow_path, 'r') as f:
+                            content = f.read()
+
+                        for action, info in vulnerable_actions.items():
+                            if action in content and info['fixed_version'] not in content:
+                                issues_found.append({
+                                    'file': workflow_path,
+                                    'action': action,
+                                    'vulnerability': info['vulnerability'],
+                                    'cve': info['cve'],
+                                    'fixed_version': info['fixed_version']
+                                })
+                    except Exception as e:
+                        print(f"Error reading {workflow_path}: {e}")
+
+        if issues_found:
+            print(" SECURITY ISSUES FOUND:")
+            for issue in issues_found:
+                print(f"  File: {issue['file']}")
+                print(f"  Action: {issue['action']}")
+                print(f"  Vulnerability: {issue['vulnerability']}")
+                print(f"  CVE: {issue['cve']}")
+                print(f"  Fixed in: {issue['fixed_version']}")
+                print()
+            print(" Please update to secure versions immediately!")
+            sys.exit(1)
+        else:
+            print(" No vulnerable GitHub Actions found")
+
+        EOF

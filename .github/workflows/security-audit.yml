@@ -1,0 +1,203 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 1'  # Monthly on the 1st
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Security audit
+      uses: actions-rs/audit-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Check for vulnerable GitHub Actions
+      run: |
+        echo "Checking for vulnerable GitHub Actions..."
+
+        # Check for known vulnerable actions
+        python3 << 'EOF'
+        import yaml
+        import os
+        import sys
+
+        vulnerable_actions = {
+            'dawidd6/action-download-artifact': {
+                'fixed_version': 'v4',
+                'vulnerability': 'Artifact poisoning vulnerability',
+                'cve': 'CVE-2024-43353'
+            },
+            'actions/download-artifact': {
+                'fixed_version': 'v4',
+                'vulnerability': 'Artifact poisoning vulnerability',
+                'cve': 'CVE-2024-43353'
+            }
+        }
+
+        issues_found = []
+
+        # Check all workflow files
+        for root, dirs, files in os.walk('.github/workflows'):
+            for file in files:
+                if file.endswith('.yml') or file.endswith('.yaml'):
+                    workflow_path = os.path.join(root, file)
+                    try:
+                        with open(workflow_path, 'r') as f:
+                            content = f.read()
+
+                        for action, info in vulnerable_actions.items():
+                            if action in content and info['fixed_version'] not in content:
+                                issues_found.append({
+                                    'file': workflow_path,
+                                    'action': action,
+                                    'vulnerability': info['vulnerability'],
+                                    'cve': info['cve'],
+                                    'fixed_version': info['fixed_version']
+                                })
+                    except Exception as e:
+                        print(f"Error reading {workflow_path}: {e}")
+
+        if issues_found:
+            print("🔴 SECURITY ISSUES FOUND:")
+            for issue in issues_found:
+                print(f"  File: {issue['file']}")
+                print(f"  Action: {issue['action']}")
+                print(f"  Vulnerability: {issue['vulnerability']}")
+                print(f"  CVE: {issue['cve']}")
+                print(f"  Fixed in: {issue['fixed_version']}")
+                print()
+            print("❌ Please update to secure versions immediately!")
+            sys.exit(1)
+        else:
+            print("✅ No vulnerable GitHub Actions found")
+
+        EOF
+
+    - name: Check for hardcoded secrets
+      run: |
+        echo "Checking for hardcoded secrets..."
+
+        # Check for common secret patterns
+        python3 << 'EOF'
+        import re
+        import os
+        import sys
+
+        # Patterns that might indicate hardcoded secrets
+        secret_patterns = [
+            r'password\s*=\s*["\'][^"\']+["\']',
+            r'api_key\s*=\s*["\'][^"\']+["\']',
+            r'secret\s*=\s*["\'][^"\']+["\']',
+            r'token\s*=\s*["\'][^"\']+["\']',
+            r'ghp_[A-Za-z0-9]{36}',  # GitHub personal access token
+            r'sk_[A-Za-z0-9]{48}',  # Stripe secret key
+            r'AIza[A-Za-z0-9_-]{35}',  # Google API key
+        ]
+
+        issues_found = []
+
+        # Check source files
+        for root, dirs, files in os.walk('.'):
+            # Skip .git and target directories
+            dirs[:] = [d for d in dirs if d not in ['.git', 'target', 'node_modules']]
+
+            for file in files:
+                if file.endswith(('.rs', '.yml', '.yaml', '.json', '.md')):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+
+                        for pattern in secret_patterns:
+                            matches = re.findall(pattern, content, re.IGNORECASE)
+                            if matches:
+                                issues_found.append({
+                                    'file': file_path,
+                                    'pattern': pattern,
+                                    'matches': matches[:3]  # Limit to first 3 matches
+                                })
+                    except Exception as e:
+                        pass
+
+        if issues_found:
+            print("🔴 POTENTIAL SECRETS FOUND:")
+            for issue in issues_found:
+                print(f"  File: {issue['file']}")
+                print(f"  Pattern: {issue['pattern']}")
+                print(f"  Matches: {issue['matches']}")
+                print()
+            print("❌ Please review and remove any hardcoded secrets!")
+            sys.exit(1)
+        else:
+            print("✅ No hardcoded secrets found")
+
+        EOF
+
+    - name: Check for insecure permissions
+      run: |
+        echo "Checking for insecure file permissions..."
+
+        # Check for files with overly permissive permissions
+        python3 << 'EOF'
+        import os
+        import stat
+        import sys
+
+        issues_found = []
+
+        for root, dirs, files in os.walk('.'):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    file_stat = os.stat(file_path)
+                    mode = file_stat.st_mode
+
+                    # Check for world-writable files
+                    if mode & stat.S_IWOTH:
+                        issues_found.append({
+                            'file': file_path,
+                            'issue': 'World-writable',
+                            'permissions': oct(mode)
+                        })
+
+                    # Check for group-writable files (in sensitive locations)
+                    if mode & stat.S_IWGRP and any(sensitive in file_path for sensitive in ['.github', 'scripts']):
+                        issues_found.append({
+                            'file': file_path,
+                            'issue': 'Group-writable in sensitive location',
+                            'permissions': oct(mode)
+                        })
+
+                except Exception as e:
+                    pass
+
+        if issues_found:
+            print("🔴 INSECURE FILE PERMISSIONS FOUND:")
+            for issue in issues_found:
+                print(f"  File: {issue['file']}")
+                print(f"  Issue: {issue['issue']}")
+                print(f"  Permissions: {issue['permissions']}")
+                print()
+            print("❌ Please fix insecure file permissions!")
+            sys.exit(1)
+        else:
+            print("✅ No insecure file permissions found")
+
+        EOF

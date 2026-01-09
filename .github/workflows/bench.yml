@@ -35,14 +35,22 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-
 
-    - name: Get main branch benchmark results
+    - name: Checkout main branch for comparison
       if: github.event_name == 'pull_request'
-      uses: dawidd6/action-download-artifact@v3
+      uses: actions/checkout@v4
       with:
-        workflow: bench.yml
-        branch: main
-        name: benchmark-results
-        path: main-benchmark-results
+        ref: ${{ github.event.pull_request.base.ref }}
+        path: main-branch
+        fetch-depth: 0
+
+    - name: Run main branch benchmarks
+      if: github.event_name == 'pull_request'
+      run: |
+        echo "Running main branch benchmarks for comparison..."
+        cd main-branch
+        cargo bench --verbose
+        mv target/criterion ../main-benchmark-results/
+        cd ..
 
     - name: Run benchmarks
       run: |
@@ -110,9 +118,22 @@ jobs:
 
             # Load main branch results if available
             main_results = {}
-            if os.path.exists('main-benchmark-results') and os.path.exists('main-benchmark-results/parsed-results.json'):
-                with open('main-benchmark-results/parsed-results.json', 'r') as f:
-                    main_results = json.load(f)
+            if os.path.exists('main-benchmark-results'):
+                for bench_dir in os.listdir('main-benchmark-results'):
+                    bench_path = os.path.join('main-benchmark-results', bench_dir)
+                    if os.path.isdir(bench_path):
+                        json_file = os.path.join(bench_path, 'new', 'estimates.json')
+                        if os.path.exists(json_file):
+                            try:
+                                with open(json_file, 'r') as f:
+                                    data = json.load(f)
+                                    median = data.get('median', {}).get('point_estimate', 0)
+                                    main_results[bench_dir] = {
+                                        'median_ns': median,
+                                        'median_ms': median / 1_000_000.0
+                                    }
+                            except:
+                                pass
 
             print(f"Current results: {len(current)} benchmarks")
             print(f"Main branch results: {len(main_results)} benchmarks")
