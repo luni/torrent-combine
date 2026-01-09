@@ -9,6 +9,10 @@ authors = ["Mason Larobina <mason.larobina@pm.me>"]
 description = "A tool to merge partially completed torrent data downloads."
 license = "MIT"
 
+[[bin]]
+name = "torrent-combine"
+path = "src/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 tempfile = "3.20"

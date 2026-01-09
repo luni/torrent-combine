@@ -1,312 +1,37 @@
-use clap::{Parser, ValueEnum};
-use std::collections::HashMap;
-use std::fs;
-use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 pub mod cache;
+pub mod cli;
+pub mod file_ops;
 pub mod merger;
+pub mod utils;
 
-// Global cleanup registry for temporary files
-static TEMP_FILES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+use cli::Args;
+use cache::FileCache;
+use utils::{setup_cleanup_on_panic, cleanup_temp_files};
 
-fn register_temp_file(path: PathBuf) {
-    if let Ok(mut files) = TEMP_FILES.lock() {
-        files.push(path);
-    }
-}
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let args: Args = clap::Parser::parse();
 
-fn cleanup_temp_files() {
-    if let Ok(files) = TEMP_FILES.lock() {
-        for path in files.iter() {
-            if path.exists() {
-                if let Err(e) = fs::remove_file(path) {
-                    log::warn!("Failed to cleanup temp file {:?}: {}", path, e);
-                } else {
-                    log::debug!("Cleaned up temp file: {:?}", path);
-                }
-            }
-        }
-    }
-}
-
-// Set up panic hook to cleanup on panic
-fn setup_cleanup_on_panic() {
-    std::panic::set_hook(Box::new(|panic_info| {
-        log::error!("Program panicked: {}", panic_info);
-        cleanup_temp_files();
-    }));
-}
-
-fn parse_file_size(s: &str) -> Result<u64, String> {
-    let s = s.trim().to_lowercase();
-
-    if s.ends_with("kb") {
-        let num: f64 = s
-            .trim_end_matches("kb")
-            .parse()
-            .map_err(|_| format!("Invalid number in '{}'", s))?;
-        Ok((num * 1024.0) as u64)
-    } else if s.ends_with("mb") {
-        let num: f64 = s
-            .trim_end_matches("mb")
-            .parse()
-            .map_err(|_| format!("Invalid number in '{}'", s))?;
-        Ok((num * 1024.0 * 1024.0) as u64)
-    } else if s.ends_with("gb") {
-        let num: f64 = s
-            .trim_end_matches("gb")
-            .parse()
-            .map_err(|_| format!("Invalid number in '{}'", s))?;
-        Ok((num * 1024.0 * 1024.0 * 1024.0) as u64)
+    // Setup logging
+    let log_level = if args.verbose {
+        log::LevelFilter::Debug
     } else {
-        // Assume bytes if no suffix
-        s.parse().map_err(|_| {
-            format!(
-                "Invalid file size '{}'. Use format like '10MB', '1GB', or '1048576'",
-                s
-            )
-        })
-    }
-}
+        log::LevelFilter::Info
+    };
 
-#[derive(Debug, Clone, ValueEnum)]
-enum DedupKey {
-    #[value(name = "filename-and-size")]
-    FilenameAndSize,
-    #[value(name = "size-only")]
-    SizeOnly,
-    #[value(name = "extension-and-size")]
-    ExtensionAndSize,
-}
+    env_logger::Builder::from_default_env()
+        .filter_level(log_level)
+        .init();
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum GroupKey {
-    FilenameAndSize(String, u64),
-    SizeOnly(u64),
-    ExtensionAndSize(String, u64),
-}
-
-#[derive(Parser, Debug)]
-#[command(name = "torrent-combine")]
-struct Args {
-    root_dir: PathBuf,
-    #[arg(
-        long,
-        help = "Specify source directories to treat as read-only (can be used multiple times)"
-    )]
-    src_dirs: Vec<PathBuf>,
-    #[arg(
-        long,
-        help = "Exclude directories from scanning (can be used multiple times)"
-    )]
-    exclude: Vec<PathBuf>,
-    #[arg(long, value_parser = parse_file_size, help = "Minimum file size to process (e.g., '10MB', '1GB', '1048576'). Default: 1MB")]
-    min_file_size: Option<u64>,
-    #[arg(long)]
-    replace: bool,
-    #[arg(long)]
-    dry_run: bool,
-    #[arg(
-        long,
-        value_delimiter = ',',
-        help = "File extensions to include (e.g., 'mkv,mp4,avi'). Default: all files"
-    )]
-    extensions: Vec<String>,
-    #[arg(long)]
-    num_threads: Option<usize>,
-    #[arg(long, value_enum, default_value = "filename-and-size")]
-    dedup_mode: DedupKey,
-    #[arg(
-        long,
-        help = "Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)"
-    )]
-    no_mmap: bool,
-    #[arg(
-        long,
-        help = "Enable verbose logging (may interfere with progress bar)"
-    )]
-    verbose: bool,
-    #[arg(long, help = "Disable caching (slower but uses less disk space)")]
-    no_cache: bool,
-    #[arg(long, help = "Clear cache before processing")]
-    clear_cache: bool,
-}
-
-fn collect_large_files(
-    dirs: &[PathBuf],
-    min_size: u64,
-    extensions: &[String],
-    exclude_dirs: &[PathBuf],
-) -> io::Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    let mut dirs_to_process: Vec<PathBuf> = dirs.to_vec();
-    let extensions: Vec<String> = extensions.iter().map(|ext| ext.to_lowercase()).collect();
-
-    // Convert exclude dirs to canonical paths for comparison
-    let mut canonical_exclude_dirs = Vec::new();
-    for exclude_dir in exclude_dirs {
-        match exclude_dir.canonicalize() {
-            Ok(canonical) => canonical_exclude_dirs.push(canonical),
-            Err(e) => log::warn!(
-                "Failed to canonicalize exclude directory {:?}: {}",
-                exclude_dir,
-                e
-            ),
-        }
-    }
-
-    while let Some(current_dir) = dirs_to_process.pop() {
-        // Check if current directory should be excluded
-        let should_exclude = match current_dir.canonicalize() {
-            Ok(canonical_current) => canonical_exclude_dirs
-                .iter()
-                .any(|exclude| canonical_current.starts_with(exclude)),
-            Err(e) => {
-                log::warn!(
-                    "Failed to canonicalize current directory {:?}: {}",
-                    current_dir,
-                    e
-                );
-                false
-            }
-        };
-
-        if should_exclude {
-            log::debug!("Excluding directory: {:?}", current_dir);
-            continue;
-        }
-        // Validate directory exists and is accessible
-        if !current_dir.exists() {
-            log::warn!("Directory does not exist: {:?}", current_dir);
-            continue;
-        }
-
-        if !current_dir.is_dir() {
-            log::warn!("Path is not a directory: {:?}", current_dir);
-            continue;
-        }
-
-        match fs::read_dir(&current_dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(entry) => {
-                            let path = entry.path();
-
-                            // Skip problematic paths
-                            if let Some(path_str) = path.to_str() {
-                                if path_str.contains('\0') {
-                                    log::warn!("Skipping path with null bytes: {:?}", path);
-                                    continue;
-                                }
-                            }
-
-                            if path.is_dir() {
-                                dirs_to_process.push(path);
-                            } else if let Ok(metadata) = fs::metadata(&path) {
-                                if metadata.len() > min_size {
-                                    // Check extension filter
-                                    if extensions.is_empty()
-                                        || path
-                                            .extension()
-                                            .and_then(|ext| ext.to_str())
-                                            .map(|ext| extensions.contains(&ext.to_lowercase()))
-                                            .unwrap_or(false)
-                                    {
-                                        files.push(path);
-                                    }
-                                }
-                            } else {
-                                log::warn!("Failed to read metadata for: {:?}", path);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "Failed to read directory entry: {:?} (error: {})",
-                                current_dir,
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to read directory {:?}: {}", current_dir, e);
-                // Continue with other directories instead of failing completely
-                continue;
-            }
-        }
-    }
-
-    Ok(files)
-}
-
-fn main() -> io::Result<()> {
-    // Set up cleanup handlers
+    // Setup cleanup on panic
     setup_cleanup_on_panic();
 
-    let args = Args::parse();
-
-    // Configure logging based on verbose flag
-    if args.verbose {
-        if std::env::var("RUST_LOG").is_err() {
-            unsafe { std::env::set_var("RUST_LOG", "info") };
-        }
-        env_logger::Builder::from_default_env()
-            .target(env_logger::Target::Stderr)
-            .init();
-    } else {
-        if std::env::var("RUST_LOG").is_err() {
-            unsafe { std::env::set_var("RUST_LOG", "warn") }; // Reduce log level to avoid interfering with progress bar
-        }
-        env_logger::Builder::from_default_env()
-            .target(env_logger::Target::Stderr) // Send logs to stderr, progress bar uses stdout
-            .init();
-    }
-
-    if args.dry_run {
-        log::info!("DRY-RUN MODE: No files will be modified. Showing what would happen.");
-    }
-
-    // Validate root directory
-    if !args.root_dir.exists() {
-        log::error!("Root directory does not exist: {:?}", args.root_dir);
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("Root directory does not exist: {:?}", args.root_dir),
-        ));
-    }
-
-    if !args.root_dir.is_dir() {
-        log::error!("Root path is not a directory: {:?}", args.root_dir);
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("Root path is not a directory: {:?}", args.root_dir),
-        ));
-    }
-
-    // Validate source directories
-    for src_dir in &args.src_dirs {
-        if !src_dir.exists() {
-            log::warn!("Source directory does not exist: {:?}", src_dir);
-        } else if !src_dir.is_dir() {
-            log::warn!("Source path is not a directory: {:?}", src_dir);
-        }
-    }
-
-    log::info!("Processing root directory: {:?}", args.root_dir);
-    if !args.src_dirs.is_empty() {
-        log::info!("Source directories: {:?}", args.src_dirs);
-    }
-
+    // Set up thread pool
     if let Some(num_threads) = args.num_threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
@@ -314,804 +39,174 @@ fn main() -> io::Result<()> {
             .unwrap();
     }
 
-    let mut all_dirs = vec![args.root_dir.clone()];
-    all_dirs.extend(args.src_dirs.clone());
-    let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
-    log::info!(
-        "Minimum file size: {} bytes ({} MB)",
-        min_file_size,
-        min_file_size / 1_048_576
-    );
+    // Initialize cache
+    let cache_dir = args.root_dir.join(".torrent-combine-cache");
+    let _cache = FileCache::new(cache_dir.clone(), 3600); // 1 hour TTL
 
-    // Initialize cache (simplified approach - only read cache, don't update during processing)
-    let cache = if !args.no_cache {
-        let cache_dir = args.root_dir.join(".torrent-combine-cache");
-        if args.clear_cache {
-            // Clear cache by removing the directory
-            if cache_dir.exists() {
-                fs::remove_dir_all(&cache_dir)?;
-                log::info!("Cache cleared");
-            }
+    // Clear cache if requested
+    if args.clear_cache {
+        // Remove cache directory
+        if cache_dir.exists() {
+            std::fs::remove_dir_all(&cache_dir)?;
         }
-        let mut cache = cache::FileCache::new(cache_dir, 3600); // 1 hour TTL
-        if let Err(e) = cache.load() {
-            log::warn!("Failed to load cache: {}", e);
-        }
-        cache.cleanup_expired();
-        Some(cache)
+        println!("Cache cleared.");
+    }
+
+    // Set default src_dirs to root_dir if not specified
+    let src_dirs = if args.src_dirs.is_empty() {
+        vec![args.root_dir.clone()]
     } else {
-        log::info!("Caching disabled");
-        None
+        args.src_dirs.clone()
     };
 
-    // Progress bar for file discovery
-    let discovery_pb = ProgressBar::new_spinner();
-    discovery_pb.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
-            .expect("Failed to set discovery progress bar template"),
-    );
-    discovery_pb.set_message("Scanning for large files...");
-    discovery_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    // Collect files
+    println!("Scanning for files...");
+    let files = file_ops::collect_large_files(
+        &src_dirs,
+        args.min_file_size.unwrap_or(0),
+        &args.extensions,
+        &args.exclude,
+    )?;
 
-    let files = collect_large_files(&all_dirs, min_file_size, &args.extensions, &args.exclude)?;
-    discovery_pb.finish_with_message("File scanning complete");
-    drop(discovery_pb);
-
-    let files_count = files.len();
-    log::info!("Found {} large files", files_count);
-
-    let mut groups: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
-    for file in files {
-        // Skip files with problematic paths
-        if let Some(path_str) = file.to_str() {
-            if path_str.contains('\0') || path_str.len() > 4096 {
-                log::warn!("Skipping file with problematic path: {:?}", file);
-                continue;
-            }
-        }
-
-        if let Ok(metadata) = fs::metadata(&file) {
-            let size = metadata.len();
-            let key = match args.dedup_mode {
-                DedupKey::FilenameAndSize => {
-                    if let Some(basename) =
-                        file.file_name().map(|s| s.to_string_lossy().to_string())
-                    {
-                        // Validate filename is reasonable
-                        if basename.len() > 255 {
-                            log::warn!("Skipping file with very long filename: {:?}", file);
-                            continue;
-                        }
-                        GroupKey::FilenameAndSize(basename, size)
-                    } else {
-                        log::warn!("Skipping file without valid filename: {:?}", file);
-                        continue;
-                    }
-                }
-                DedupKey::SizeOnly => GroupKey::SizeOnly(size),
-                DedupKey::ExtensionAndSize => {
-                    if let Some(extension) = file.extension().and_then(|ext| ext.to_str()) {
-                        // Validate extension is reasonable
-                        if extension.len() > 10 {
-                            log::warn!("Skipping file with very long extension: {:?}", file);
-                            continue;
-                        }
-                        GroupKey::ExtensionAndSize(extension.to_lowercase(), size)
-                    } else {
-                        log::warn!("Skipping file without valid extension: {:?}", file);
-                        continue;
-                    }
-                }
-            };
-            groups.entry(key).or_default().push(file);
-        } else {
-            log::warn!("Failed to read metadata for file: {:?}", file);
-        }
+    if files.is_empty() {
+        println!("No files found matching criteria.");
+        return Ok(());
     }
 
-    let groups_to_process: Vec<_> = groups
-        .into_iter()
-        .filter(|(_, paths)| paths.len() >= 2)
-        .collect();
-    let total_groups = groups_to_process.len();
-    log::info!("Found {} groups to process", total_groups);
+    println!("Found {} files.", files.len());
 
-    // Store groups for cache update later
-    let groups_for_cache = groups_to_process.clone();
+    // Group files
+    println!("Grouping files...");
+    let groups = file_ops::group_files(files, &args.dedup_mode)?;
 
-    // Create progress bar
-    let pb = ProgressBar::new(total_groups as u64);
-    pb.set_style(
+    if groups.is_empty() {
+        println!("No file groups found (all files are unique).");
+        return Ok(());
+    }
+
+    println!("Found {} file groups.", groups.len());
+
+    // Process groups
+    let progress = ProgressBar::new(groups.len() as u64);
+    progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-            .expect("Failed to set progress bar template")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
             .progress_chars("#>-")
     );
-    pb.set_message("Processing groups");
-    pb.enable_steady_tick(std::time::Duration::from_millis(500));
 
-    let groups_processed = Arc::new(AtomicUsize::new(0));
-    let merged_groups_count = Arc::new(AtomicUsize::new(0));
-    let skipped_groups_count = Arc::new(AtomicUsize::new(0));
-    let pb_shared = Arc::new(pb);
-
-    groups_to_process
-        .into_par_iter()
-        .for_each(|(group_key, paths)| {
-            let groups_processed_cloned = Arc::clone(&groups_processed);
-            let merged_groups_count_cloned = Arc::clone(&merged_groups_count);
-            let skipped_groups_count_cloned = Arc::clone(&skipped_groups_count);
-            let pb_cloned = Arc::clone(&pb_shared);
-
-            let group_name = match &group_key {
-                GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
-                GroupKey::SizeOnly(size) => format!("size-{}", size),
-                GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
-            };
-
-            // Check cache first
-            let should_process = if let Some(cache) = &cache {
-                if let Some(cached_group) = cache.get_group_cache(&group_name) {
-                    // Check if cache is still valid
-                    if cache.is_cache_valid(cached_group.last_verified) {
-                        // Check if files have changed
-                        let mut files_changed = false;
-                        for cached_file in &cached_group.files {
-                            // Compare cached file info with current file metadata directly
-                            let current_metadata = match fs::metadata(&cached_file.path) {
-                                Ok(meta) => meta,
-                                Err(_) => {
-                                    log::warn!(
-                                        "Failed to read metadata for: {:?}",
-                                        cached_file.path
-                                    );
-                                    files_changed = true;
-                                    break;
-                                }
-                            };
-                            let current_size = current_metadata.len();
-                            let current_modified = current_metadata
-                                .modified()
-                                .unwrap_or(SystemTime::UNIX_EPOCH)
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-
-                            if cached_file.size != current_size
-                                || cached_file.modified != current_modified
-                            {
-                                log::debug!(
-                                    "File changed: {:?} (size: {}->{}, modified: {}->{})",
-                                    cached_file.path,
-                                    cached_file.size,
-                                    current_size,
-                                    cached_file.modified,
-                                    current_modified
-                                );
-                                files_changed = true;
-                                break;
-                            }
-                        }
-
-                        if !files_changed {
-                            // Use cached result
-                            let processed_count =
-                                groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
-                            pb_cloned.set_position(processed_count as u64);
-
-                            if cached_group.is_complete {
-                                skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
-                                if args.verbose {
-                                    log::info!(
-                                        "Group '{}' skipped (cached - all files complete)",
-                                        group_name
-                                    );
-                                }
-                            } else {
-                                merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
-                                if args.verbose {
-                                    log::info!("Group '{}' merged (cached result)", group_name);
-                                }
-                            }
-                            return;
-                        }
-                    }
-                    true // Process if no cache or cache invalid
-                } else {
-                    true // No cache entry, process normally
-                }
-            } else {
-                true // No cache, process normally
-            };
-
-            if !should_process {
-                return;
-            }
-
-            match merger::process_group_with_dry_run(
-                &paths,
-                &group_name,
-                args.replace,
-                &args.src_dirs,
+    let results: Vec<_> = groups
+        .into_iter()
+        .collect::<Vec<_>>()
+        .par_iter()
+        .map(|(group_name, files)| {
+            let result = process_group(
+                group_name,
+                files,
+                &args,
+                cache_dir.clone(),
                 args.dry_run,
-                args.no_mmap,
-            ) {
-                Ok(stats) => {
-                    let processed_count =
-                        groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
-                    pb_cloned.set_position(processed_count as u64);
+            );
+            progress.inc(1);
+            result
+        })
+        .collect();
 
-                    match stats.status {
-                        merger::GroupStatus::Merged => {
-                            merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
-                            let mb_per_sec = (stats.bytes_processed as f64 / 1_048_576.0)
-                                / stats.processing_time.as_secs_f64();
-                            let mb_per_sec = format!("{:.2}", mb_per_sec);
-                            // Only log at info level if verbose, otherwise debug to avoid interfering with progress bar
-                            if args.verbose {
-                                log::info!(
-                                    "Group '{}' merged at {:.2} MB/s",
-                                    group_name,
-                                    mb_per_sec
-                                );
-                                if !stats.merged_files.is_empty() {
-                                    for file in stats.merged_files {
-                                        log::info!("  -> Created merged file: {}", file.display());
-                                    }
-                                }
-                            } else {
-                                log::debug!(
-                                    "Group '{}' merged at {:.2} MB/s",
-                                    group_name,
-                                    mb_per_sec
-                                );
-                                if !stats.merged_files.is_empty() {
-                                    for file in stats.merged_files {
-                                        log::debug!("  -> Created merged file: {}", file.display());
-                                    }
-                                }
-                            }
-                        }
-                        merger::GroupStatus::Skipped => {
-                            skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
-                            if args.verbose {
-                                log::info!("Group '{}' skipped (all files complete)", group_name);
-                            } else {
-                                log::debug!("Group '{}' skipped (all files complete)", group_name);
-                            }
-                        }
-                        merger::GroupStatus::Failed => {
-                            if args.verbose {
-                                log::warn!("Group '{}' failed sanity check", group_name);
-                            } else {
-                                log::debug!("Group '{}' failed sanity check", group_name);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    log::error!("Error processing group {}: {:?}", group_name, e);
+    progress.finish();
+
+    // Print summary
+    let mut total_merged = 0;
+    let mut total_skipped = 0;
+    let mut total_failed = 0;
+
+    for result in results {
+        match result {
+            Ok(stats) => {
+                if stats.merged_files.len() > 0 {
+                    total_merged += stats.merged_files.len();
+                    println!("Merged {} files for group", stats.merged_files.len());
+                } else {
+                    total_skipped += 1;
                 }
             }
-        });
-
-    // Extract the progress bar from Arc to finish it
-    let pb = Arc::try_unwrap(pb_shared).expect("Failed to unwrap progress bar");
-    pb.finish_with_message("Processing complete");
-
-    // Save cache if enabled
-    if let Some(mut cache) = cache {
-        // Update cache with final results (simplified approach)
-        for (group_key, paths) in groups_for_cache {
-            let group_name = match &group_key {
-                GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
-                GroupKey::SizeOnly(size) => format!("size-{}", size),
-                GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
-            };
-
-            // Collect file info for this group
-            let mut file_infos = Vec::new();
-            for path in &paths {
-                if let Ok(Some(file_info)) = cache.get_file_info_with_hash(path) {
-                    file_infos.push(file_info);
-                }
+            Err(e) => {
+                total_failed += 1;
+                eprintln!("Error processing group: {}", e);
             }
-
-            // For now, mark all as complete (this could be improved with actual processing results)
-            cache.update_group_cache(group_name, file_infos, true);
-        }
-
-        if let Err(e) = cache.save() {
-            log::warn!("Failed to save cache: {}", e);
-        } else {
-            log::info!("Cache saved");
         }
     }
 
-    let final_processed = groups_processed.load(Ordering::SeqCst);
-    let final_merged = merged_groups_count.load(Ordering::SeqCst);
-    let final_skipped = skipped_groups_count.load(Ordering::SeqCst);
+    println!("\nSummary:");
+    println!("  Merged: {} files", total_merged);
+    println!("  Skipped: {} groups", total_skipped);
+    println!("  Failed: {} groups", total_failed);
 
-    log::info!("--------------------");
-    log::info!("Processing Summary:");
-    log::info!("Total groups: {}", total_groups);
-    log::info!("  - Processed: {}", final_processed);
-    log::info!("  - Merged: {}", final_merged);
-    log::info!("  - Skipped: {}", final_skipped);
-    log::info!("--------------------");
-
-    // Clean up any remaining temporary files
+    // Cleanup
     cleanup_temp_files();
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_dedup_key_enum_variants() {
-        assert_eq!(
-            format!("{:?}", DedupKey::FilenameAndSize),
-            "FilenameAndSize"
-        );
-        assert_eq!(format!("{:?}", DedupKey::SizeOnly), "SizeOnly");
-        assert_eq!(
-            format!("{:?}", DedupKey::ExtensionAndSize),
-            "ExtensionAndSize"
-        );
-    }
-
-    #[test]
-    fn test_group_key_equality() {
-        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key2 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key3 = GroupKey::FilenameAndSize("other.mkv".to_string(), 1024);
-        let key4 = GroupKey::SizeOnly(1024);
-        let key5 = GroupKey::SizeOnly(1024);
-        let key6 = GroupKey::SizeOnly(2048);
-
-        assert_eq!(key1, key2);
-        assert_ne!(key1, key3);
-        assert_ne!(key1, key4);
-        assert_eq!(key4, key5);
-        assert_ne!(key4, key6);
-    }
-
-    #[test]
-    fn test_group_key_hash() {
-        let mut map: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
-
-        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key2 = GroupKey::SizeOnly(1024);
-
-        map.insert(key1, vec![PathBuf::from("/path1")]);
-        map.insert(key2, vec![PathBuf::from("/path2")]);
-
-        assert_eq!(map.len(), 2);
-
-        let key1_dup = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        map.entry(key1_dup)
-            .or_default()
-            .push(PathBuf::from("/path3"));
-
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
-    fn test_group_name_formatting_with_extension() {
-        let key1 = GroupKey::ExtensionAndSize("mkv".to_string(), 2097152);
-        let key2 = GroupKey::ExtensionAndSize("mp4".to_string(), 1048576);
-
-        let name1 = match &key1 {
-            GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
-            GroupKey::SizeOnly(size) => format!("size-{}", size),
-            GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
-        };
-
-        let name2 = match &key2 {
-            GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
-            GroupKey::SizeOnly(size) => format!("size-{}", size),
-            GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
-        };
-
-        assert_eq!(name1, "mkv.2097152");
-        assert_eq!(name2, "mp4.1048576");
-    }
-
-    #[test]
-    fn test_cli_parsing_basic() {
-        // Test the parsing logic by checking that our parse_file_size function works correctly
-        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("10KB").unwrap(), 10_240);
-    }
-
-    #[test]
-    fn test_cli_dedup_mode() {
-        assert_eq!(
-            format!("{:?}", DedupKey::FilenameAndSize),
-            "FilenameAndSize"
-        );
-        assert_eq!(format!("{:?}", DedupKey::SizeOnly), "SizeOnly");
-    }
-
-    #[test]
-    fn test_group_key_creation() {
-        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key2 = GroupKey::SizeOnly(1024);
-
-        // Test that keys can be created and compared
-        assert_eq!(key1, key1);
-        assert_eq!(key2, key2);
-        assert_ne!(key1, key2);
-    }
-
-    #[test]
-    fn test_parse_file_size_bytes() {
-        assert_eq!(parse_file_size("1048576").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("1024").unwrap(), 1024);
-        assert_eq!(parse_file_size("0").unwrap(), 0);
-    }
-
-    #[test]
-    fn test_parse_file_size_kilobytes() {
-        assert_eq!(parse_file_size("1KB").unwrap(), 1024);
-        assert_eq!(parse_file_size("10KB").unwrap(), 10_240);
-        assert_eq!(parse_file_size("1.5KB").unwrap(), 1536);
-        assert_eq!(parse_file_size("100kb").unwrap(), 102_400); // case insensitive
-    }
-
-    #[test]
-    fn test_parse_file_size_megabytes() {
-        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("10MB").unwrap(), 10_485_760);
-        assert_eq!(parse_file_size("0.5MB").unwrap(), 524_288);
-        assert_eq!(parse_file_size("2.5mb").unwrap(), 2_621_440); // case insensitive
-    }
-
-    #[test]
-    fn test_parse_file_size_gigabytes() {
-        assert_eq!(parse_file_size("1GB").unwrap(), 1_073_741_824);
-        assert_eq!(parse_file_size("2GB").unwrap(), 2_147_483_648);
-        assert_eq!(parse_file_size("0.5GB").unwrap(), 536_870_912);
-        assert_eq!(parse_file_size("1.5gb").unwrap(), 1_610_612_736); // case insensitive
-    }
-
-    #[test]
-    fn test_parse_file_size_invalid() {
-        assert!(parse_file_size("invalid").is_err());
-        assert!(parse_file_size("10XB").is_err());
-        assert!(parse_file_size("abcMB").is_err());
-        assert!(parse_file_size("").is_err());
-        assert!(parse_file_size("10.5.2MB").is_err());
-    }
-
-    #[test]
-    fn test_parse_file_size_whitespace() {
-        assert_eq!(parse_file_size(" 1MB ").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("\t10KB\n").unwrap(), 10_240);
-    }
-
-    // Tests for new CLI functionality
-    #[test]
-    fn test_multiple_src_dirs_parsing() {
-        // Test that src_dirs can accept multiple values
-        use std::ffi::OsString;
-
-        // This simulates command line parsing with multiple --src-dirs
-        let _args = [
-            OsString::from("torrent-combine"),
-            OsString::from("/test"),
-            OsString::from("--src-dirs"),
-            OsString::from("/readonly1"),
-            OsString::from("--src-dirs"),
-            OsString::from("/readonly2"),
-        ];
-
-        // The actual parsing is handled by clap, but we can test the data structure
-        let src_dirs = [PathBuf::from("/readonly1"), PathBuf::from("/readonly2")];
-
-        assert_eq!(src_dirs.len(), 2);
-        assert_eq!(src_dirs[0], PathBuf::from("/readonly1"));
-        assert_eq!(src_dirs[1], PathBuf::from("/readonly2"));
-    }
-
-    #[test]
-    fn test_multiple_exclude_parsing() {
-        // Test that exclude can accept multiple values
-        let exclude_dirs = [
-            PathBuf::from("/temp"),
-            PathBuf::from("/cache"),
-            PathBuf::from("/incomplete"),
-        ];
-
-        assert_eq!(exclude_dirs.len(), 3);
-        assert_eq!(exclude_dirs[0], PathBuf::from("/temp"));
-        assert_eq!(exclude_dirs[1], PathBuf::from("/cache"));
-        assert_eq!(exclude_dirs[2], PathBuf::from("/incomplete"));
-    }
-
-    #[test]
-    fn test_group_key_clone() {
-        // Test that GroupKey implements Clone correctly
-        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key2 = key1.clone();
-
-        assert_eq!(key1, key2);
-        assert_eq!(format!("{:?}", key1), format!("{:?}", key2));
-    }
-
-    #[test]
-    fn test_collect_large_files_with_excludes() {
-        use std::fs;
-        use tempfile::tempdir;
-
-        // Create a temporary directory structure
-        let temp_dir = tempdir().unwrap();
-        let base_path = temp_dir.path();
-
-        // Create directory structure
-        let keep_dir = base_path.join("keep");
-        let exclude_dir = base_path.join("exclude");
-        fs::create_dir(&keep_dir).unwrap();
-        fs::create_dir(&exclude_dir).unwrap();
-
-        // Create test files
-        let keep_file = keep_dir.join("test.mkv");
-        let exclude_file = exclude_dir.join("test.mkv");
-        fs::write(&keep_file, "test content").unwrap();
-        fs::write(&exclude_file, "exclude content").unwrap();
-
-        // Test without exclusion
-        let dirs = vec![base_path.to_path_buf()];
-        let files = collect_large_files(&dirs, 1, &[], &[]).unwrap();
-        assert_eq!(files.len(), 2); // Should find both files
-
-        // Test with exclusion
-        let exclude_dirs = vec![exclude_dir.clone()];
-        let files = collect_large_files(&dirs, 1, &[], &exclude_dirs).unwrap();
-        assert_eq!(files.len(), 1); // Should only find the keep file
-        assert!(files.contains(&keep_file));
-        assert!(!files.contains(&exclude_file));
-    }
-
-    #[test]
-    fn test_collect_large_files_with_extension_filter() {
-        use std::fs;
-        use tempfile::tempdir;
-
-        // Create a temporary directory structure
-        let temp_dir = tempdir().unwrap();
-        let base_path = temp_dir.path();
-
-        // Create test files with different extensions
-        let mkv_file = base_path.join("test.mkv");
-        let mp4_file = base_path.join("test.mp4");
-        let txt_file = base_path.join("test.txt");
-
-        fs::write(&mkv_file, "mkv content").unwrap();
-        fs::write(&mp4_file, "mp4 content").unwrap();
-        fs::write(&txt_file, "txt content").unwrap();
-
-        // Test with extension filter
-        let dirs = vec![base_path.to_path_buf()];
-        let extensions = vec!["mkv".to_string(), "mp4".to_string()];
-        let files = collect_large_files(&dirs, 1, &extensions, &[]).unwrap();
-
-        assert_eq!(files.len(), 2); // Should only find mkv and mp4 files
-        assert!(files.contains(&mkv_file));
-        assert!(files.contains(&mp4_file));
-        assert!(!files.contains(&txt_file));
-    }
-
-    #[test]
-    fn test_collect_large_files_with_min_size() {
-        use std::fs;
-        use tempfile::tempdir;
-
-        // Create a temporary directory structure
-        let temp_dir = tempdir().unwrap();
-        let base_path = temp_dir.path();
-
-        // Create test files with different sizes
-        let small_file = base_path.join("small.mkv");
-        let large_file = base_path.join("large.mkv");
-
-        fs::write(&small_file, "small").unwrap(); // 5 bytes
-        fs::write(&large_file, "large content here").unwrap(); // 18 bytes
-
-        // Test with minimum size filter
-        let dirs = vec![base_path.to_path_buf()];
-        let files = collect_large_files(&dirs, 10, &[], &[]).unwrap();
-
-        assert_eq!(files.len(), 1); // Should only find the large file
-        assert!(files.contains(&large_file));
-        assert!(!files.contains(&small_file));
-    }
-
-    #[test]
-    fn test_temp_file_cleanup_registry() {
-        // Test that the temp file registry works correctly
-
-        // Clear any existing temp files
-        cleanup_temp_files();
-
-        // Register some test temp files
-        let test_file1 = PathBuf::from("/tmp/test1.tmp");
-        let test_file2 = PathBuf::from("/tmp/test2.tmp");
-
-        register_temp_file(test_file1.clone());
-        register_temp_file(test_file2.clone());
-
-        // Note: We can't actually test file deletion without creating real files,
-        // but we can test the registry mechanism
-        // The cleanup function will attempt to delete the files, which is fine
-        // even if they don't exist
-        cleanup_temp_files();
-
-        // Test passes if no panic occurs
-        // assert!(true); // Removed - optimized out
-    }
-
-    #[test]
-    fn test_temp_file_cleanup_registry_with_real_files() {
-        use tempfile::tempdir;
-
-        // Create a temporary directory for cache
-        let temp_dir = tempdir().unwrap();
-        let cache_dir = temp_dir.path().join("cache");
-        std::fs::create_dir(&cache_dir).unwrap();
-
-        // Create cache instance
-        let mut cache = cache::FileCache::new(cache_dir.clone(), 3600);
-
-        // Test cache creation
-        assert!(cache_dir.exists());
-
-        // Test saving empty cache
-        let result = cache.save();
-        assert!(result.is_ok());
-
-        // Test loading empty cache
-        let result = cache.load();
-        assert!(result.is_ok());
-
-        // Test cleanup
-        cache.cleanup_expired();
-        // assert!(true); // Removed - optimized out
-    }
-
-    #[test]
-    fn test_cache_functionality_basic() {
-        use tempfile::tempdir;
-
-        // Create a temporary directory for cache
-        let temp_dir = tempdir().unwrap();
-        let cache_dir = temp_dir.path().join("cache");
-        std::fs::create_dir(&cache_dir).unwrap();
-
-        // Create cache instance
-        let mut cache = cache::FileCache::new(cache_dir.clone(), 3600);
-
-        // Test cache creation
-        assert!(cache_dir.exists());
-
-        // Test saving empty cache
-        let result = cache.save();
-        assert!(result.is_ok());
-
-        // Test loading empty cache
-        let result = cache.load();
-        assert!(result.is_ok());
-
-        // Test cleanup
-        cache.cleanup_expired();
-        // assert!(true); // Removed - optimized out
-    }
-
-    #[test]
-    fn test_group_key_hash_consistency() {
-        // Test that GroupKey hashing is consistent
-        use std::collections::HashMap;
-        use std::hash::{Hash, Hasher};
-
-        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key2 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
-        let key3 = GroupKey::FilenameAndSize("other.mkv".to_string(), 1024);
-
-        let mut map: HashMap<GroupKey, String> = HashMap::new();
-        map.insert(key1.clone(), "value1".to_string());
-        map.insert(key3.clone(), "value3".to_string());
-
-        // Should be able to retrieve with equal key
-        assert_eq!(map.get(&key2), Some(&"value1".to_string()));
-        assert_eq!(map.get(&key3), Some(&"value3".to_string()));
-
-        // Test that equal keys have equal hashes
-        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
-        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
-        key1.hash(&mut hasher1);
-        key2.hash(&mut hasher2);
-        assert_eq!(hasher1.finish(), hasher2.finish());
-
-        // Test that different keys have different hashes
-        let mut hasher3 = std::collections::hash_map::DefaultHasher::new();
-        key3.hash(&mut hasher3);
-        assert_ne!(hasher1.finish(), hasher3.finish());
-    }
-
-    #[test]
-    fn test_dedup_mode_variants() {
-        // Test all dedup mode variants
-        let modes = vec![
-            DedupKey::FilenameAndSize,
-            DedupKey::SizeOnly,
-            DedupKey::ExtensionAndSize,
-        ];
-
-        for mode in modes {
-            // Test that each variant can be created and compared
-            match mode {
-                DedupKey::FilenameAndSize => {}  // Test passes if variant exists
-                DedupKey::SizeOnly => {}         // Test passes if variant exists
-                DedupKey::ExtensionAndSize => {} // Test passes if variant exists
+fn process_group(
+    group_name: &str,
+    files: &Vec<PathBuf>,
+    args: &Args,
+    cache_dir: PathBuf,
+    dry_run: bool,
+) -> Result<merger::GroupStats, Box<dyn std::error::Error + Send + Sync>> {
+    // Initialize cache for this group
+    let mut cache = FileCache::new(cache_dir, 3600);
+
+    // Check cache first
+    if !args.no_cache {
+        if let Some(cached_result) = cache.get_group_cache(group_name) {
+            if cached_result.files.len() > 0 && cached_result.files.iter().all(|f| {
+                files.iter().any(|file| {
+                    file == &f.path
+                })
+            }) {
+                return Ok(merger::GroupStats {
+                    status: merger::GroupStatus::Skipped,
+                    processing_time: std::time::Duration::from_secs(0),
+                    bytes_processed: 0,
+                    merged_files: vec![],
+                });
             }
         }
     }
 
-    #[test]
-    fn test_file_size_parsing_edge_cases() {
-        // Test edge cases for file size parsing
-        assert_eq!(parse_file_size("0MB").unwrap(), 0);
-        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("1024MB").unwrap(), 1_048_576 * 1024);
+    // Process the group
+    let stats = merger::process_group_with_dry_run(
+        files,
+        group_name,
+        args.replace,
+        &args.src_dirs,
+        dry_run,
+        args.no_mmap,
+    )?;
 
-        // Test case insensitive
-        assert_eq!(parse_file_size("1mb").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("1Mb").unwrap(), 1_048_576);
-        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
+    // Update cache
+    if !args.no_cache && !dry_run {
+        let file_infos: Result<Vec<cache::FileInfo>, Box<dyn std::error::Error>> = files
+            .iter()
+            .map(|f| {
+                let (size, modified) = file_ops::get_file_info(f)?;
+                Ok(cache::FileInfo {
+                    path: f.clone(),
+                    size,
+                    modified: modified.duration_since(std::time::UNIX_EPOCH)?.as_secs(),
+                    hash: String::new(), // Will be computed later if needed
+                    last_verified: SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)?
+                        .as_secs(),
+                })
+            })
+            .collect();
 
-        // Test decimal values
-        assert_eq!(parse_file_size("1.5MB").unwrap(), 1_048_576 + 524_288);
-        assert_eq!(parse_file_size("0.5GB").unwrap(), 536_870_912);
+        if let Ok(infos) = file_infos {
+            cache.update_group_cache(group_name.to_string(), infos, true);
+        }
     }
 
-    #[test]
-    fn test_path_handling_edge_cases() {
-        // Test path handling with various edge cases
-        let normal_path = PathBuf::from("/normal/path");
-        let relative_path = PathBuf::from("./relative/path");
-        let complex_path = PathBuf::from("/path/with spaces/and-dashes");
-
-        // Test that paths can be cloned and compared
-        let normal_clone = normal_path.clone();
-        assert_eq!(normal_path, normal_clone);
-
-        // Test path components
-        assert_eq!(normal_path.file_name().unwrap().to_str().unwrap(), "path");
-        assert_eq!(relative_path.components().count(), 3); // ".", "relative", "path"
-        assert!(complex_path.to_str().unwrap().contains(" "));
-    }
-
-    #[test]
-    fn test_atomic_counter_operations() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // Test atomic counter behavior used in progress tracking
-        let counter = AtomicUsize::new(0);
-
-        assert_eq!(counter.load(Ordering::SeqCst), 0);
-
-        // Test fetch_add
-        let old_value = counter.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(old_value, 0);
-        assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-        // Test multiple operations
-        counter.fetch_add(5, Ordering::SeqCst);
-        assert_eq!(counter.load(Ordering::SeqCst), 6);
-    }
+    Ok(stats)
 }
