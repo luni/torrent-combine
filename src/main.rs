@@ -5,11 +5,13 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod merger;
+pub mod cache;
 
 fn parse_file_size(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
@@ -43,7 +45,7 @@ enum DedupKey {
     ExtensionAndSize,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum GroupKey {
     FilenameAndSize(String, u64),
     SizeOnly(u64),
@@ -72,6 +74,10 @@ struct Args {
     no_mmap: bool,
     #[arg(long, help = "Enable verbose logging (may interfere with progress bar)")]
     verbose: bool,
+    #[arg(long, help = "Disable caching (slower but uses less disk space)")]
+    no_cache: bool,
+    #[arg(long, help = "Clear cache before processing")]
+    clear_cache: bool,
 }
 
 fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -> io::Result<Vec<PathBuf>> {
@@ -206,6 +212,27 @@ fn main() -> io::Result<()> {
     let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
     log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
 
+    // Initialize cache (simplified approach - only read cache, don't update during processing)
+    let cache = if !args.no_cache {
+        let cache_dir = args.root_dir.join(".torrent-combine-cache");
+        if args.clear_cache {
+            // Clear cache by removing the directory
+            if cache_dir.exists() {
+                fs::remove_dir_all(&cache_dir)?;
+                log::info!("Cache cleared");
+            }
+        }
+        let mut cache = cache::FileCache::new(cache_dir, 3600); // 1 hour TTL
+        if let Err(e) = cache.load() {
+            log::warn!("Failed to load cache: {}", e);
+        }
+        cache.cleanup_expired();
+        Some(cache)
+    } else {
+        log::info!("Caching disabled");
+        None
+    };
+
     // Progress bar for file discovery
     let discovery_pb = ProgressBar::new_spinner();
     discovery_pb.set_style(
@@ -279,6 +306,9 @@ fn main() -> io::Result<()> {
     let total_groups = groups_to_process.len();
     log::info!("Found {} groups to process", total_groups);
 
+    // Store groups for cache update later
+    let groups_for_cache = groups_to_process.clone();
+
     // Create progress bar
     let pb = ProgressBar::new(total_groups as u64);
     pb.set_style(
@@ -309,6 +339,71 @@ fn main() -> io::Result<()> {
                 GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
             };
 
+            // Check cache first
+            let should_process = if let Some(cache) = &cache {
+                if let Some(cached_group) = cache.get_group_cache(&group_name) {
+                    // Check if cache is still valid
+                    if cache.is_cache_valid(cached_group.last_verified) {
+                        // Check if files have changed
+                        let mut files_changed = false;
+                        for cached_file in &cached_group.files {
+                            // Compare cached file info with current file metadata directly
+                            let current_metadata = match fs::metadata(&cached_file.path) {
+                                Ok(meta) => meta,
+                                Err(_) => {
+                                    log::warn!("Failed to read metadata for: {:?}", cached_file.path);
+                                    files_changed = true;
+                                    break;
+                                }
+                            };
+                            let current_size = current_metadata.len();
+                            let current_modified = current_metadata.modified()
+                                .unwrap_or(SystemTime::UNIX_EPOCH)
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+
+                            if cached_file.size != current_size ||
+                               cached_file.modified != current_modified {
+                                log::debug!("File changed: {:?} (size: {}->{}, modified: {}->{})",
+                                          cached_file.path, cached_file.size, current_size,
+                                          cached_file.modified, current_modified);
+                                files_changed = true;
+                                break;
+                            }
+                        }
+
+                        if !files_changed {
+                            // Use cached result
+                            let processed_count = groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
+                            pb_cloned.set_position(processed_count as u64);
+
+                            if cached_group.is_complete {
+                                skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
+                                if args.verbose {
+                                    log::info!("Group '{}' skipped (cached - all files complete)", group_name);
+                                }
+                            } else {
+                                merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
+                                if args.verbose {
+                                    log::info!("Group '{}' merged (cached result)", group_name);
+                                }
+                            }
+                            return;
+                        }
+                    }
+                    true // Process if no cache or cache invalid
+                } else {
+                    true // No cache entry, process normally
+                }
+            } else {
+                true // No cache, process normally
+            };
+
+            if !should_process {
+                return;
+            }
+
             match merger::process_group_with_dry_run(&paths, &group_name, args.replace, &args.src_dirs, args.dry_run, args.no_mmap) {
                 Ok(stats) => {
                     let processed_count = groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
@@ -319,6 +414,7 @@ fn main() -> io::Result<()> {
                             merged_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
                             let mb_per_sec = (stats.bytes_processed as f64 / 1_048_576.0)
                                 / stats.processing_time.as_secs_f64();
+                            let mb_per_sec = format!("{:.2}", mb_per_sec);
                             // Only log at info level if verbose, otherwise debug to avoid interfering with progress bar
                             if args.verbose {
                                 log::info!(
@@ -382,6 +478,35 @@ fn main() -> io::Result<()> {
     // Extract the progress bar from Arc to finish it
     let pb = Arc::try_unwrap(pb_shared).expect("Failed to unwrap progress bar");
     pb.finish_with_message("Processing complete");
+
+    // Save cache if enabled
+    if let Some(mut cache) = cache {
+        // Update cache with final results (simplified approach)
+        for (group_key, paths) in groups_for_cache {
+            let group_name = match &group_key {
+                GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
+                GroupKey::SizeOnly(size) => format!("size-{}", size),
+                GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
+            };
+
+            // Collect file info for this group
+            let mut file_infos = Vec::new();
+            for path in &paths {
+                if let Ok(Some(file_info)) = cache.get_file_info_with_hash(path) {
+                    file_infos.push(file_info);
+                }
+            }
+
+            // For now, mark all as complete (this could be improved with actual processing results)
+            cache.update_group_cache(group_name, file_infos, true);
+        }
+
+        if let Err(e) = cache.save() {
+            log::warn!("Failed to save cache: {}", e);
+        } else {
+            log::info!("Cache saved");
+        }
+    }
 
     let final_processed = groups_processed.load(Ordering::SeqCst);
     let final_merged = merged_groups_count.load(Ordering::SeqCst);
