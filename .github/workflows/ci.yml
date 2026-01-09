@@ -182,32 +182,32 @@ jobs:
         echo -n "readonly content" > test-data/readonly/video.mkv
 
         # Test basic functionality
-        ./target/release/torrent-combine test-data --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --min-size 1 --verbose
 
         # Test with multiple root directories
-        ./target/release/torrent-combine test-data/dir1 test-data/dir2 --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data/dir1 test-data/dir2 --min-size 1 --verbose
 
         # Test with source directories
-        ./target/release/torrent-combine test-data --src test-data/readonly --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --src test-data/readonly --min-size 1 --verbose
 
         # Test with exclude directories
-        ./target/release/torrent-combine test-data --exclude test-data/dir2 --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --exclude test-data/dir2 --min-size 1 --verbose
 
         # Test with multiple options
-        ./target/release/torrent-combine test-data --src test-data/readonly --exclude test-data/dir2 --extensions mkv --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --src test-data/readonly --exclude test-data/dir2 --extensions mkv --min-size 1 --verbose
 
         # Test with multiple root directories
-        ./target/release/torrent-combine test-data/dir1 test-data/dir2 --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data/dir1 test-data/dir2 --min-size 1 --verbose
 
         # Test cache functionality
-        ./target/release/torrent-combine test-data --min-file-size 1 --verbose
-        ./target/release/torrent-combine test-data --min-file-size 1 --verbose  # Second run should use cache
+        ./target/release/torrent-combine test-data --min-size 1 --verbose
+        ./target/release/torrent-combine test-data --min-size 1 --verbose  # Second run should use cache
 
         # Test dry run
-        ./target/release/torrent-combine test-data --dry-run --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --dry-run --min-size 1 --verbose
 
         # Test cache clearing
-        ./target/release/torrent-combine test-data --clear-cache --min-file-size 1 --verbose
+        ./target/release/torrent-combine test-data --clear-cache --min-size 1 --verbose
 
   coverage:
     name: Code Coverage
