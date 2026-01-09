@@ -399,11 +399,7 @@ mod tests {
             last_verified: 0,
         };
 
-        cache.update_group_cache(
-            "test_group".to_string(),
-            vec![file_info3.clone()],
-            false,
-        );
+        cache.update_group_cache("test_group".to_string(), vec![file_info3.clone()], false);
 
         let retrieved = cache.get_group_cache("test_group").unwrap();
         assert_eq!(retrieved.files.len(), 1);

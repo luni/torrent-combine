@@ -885,10 +885,7 @@ mod tests {
 
     #[test]
     fn test_file_filter_new() {
-        let src_dirs = vec![
-            PathBuf::from("/src1"),
-            PathBuf::from("/src2"),
-        ];
+        let src_dirs = vec![PathBuf::from("/src1"), PathBuf::from("/src2")];
         let filter = FileFilter::new(src_dirs.clone());
 
         // Test that filter stores src_dirs correctly

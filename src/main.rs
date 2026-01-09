@@ -10,9 +10,9 @@ pub mod file_ops;
 pub mod merger;
 pub mod utils;
 
-use cli::Args;
 use cache::FileCache;
-use utils::{setup_cleanup_on_panic, cleanup_temp_files};
+use cli::Args;
+use utils::{cleanup_temp_files, setup_cleanup_on_panic};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Args = clap::Parser::parse();
@@ -90,9 +90,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let progress = ProgressBar::new(groups.len() as u64);
     progress.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template(
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+            )
             .unwrap()
-            .progress_chars("#>-")
+            .progress_chars("#>-"),
     );
 
     let results: Vec<_> = groups
@@ -100,13 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .collect::<Vec<_>>()
         .par_iter()
         .map(|(group_name, files)| {
-            let result = process_group(
-                group_name,
-                files,
-                &args,
-                cache_dir.clone(),
-                args.dry_run,
-            );
+            let result = process_group(group_name, files, &args, cache_dir.clone(), args.dry_run);
             progress.inc(1);
             result
         })
@@ -160,11 +156,12 @@ fn process_group(
     // Check cache first
     if !args.no_cache {
         if let Some(cached_result) = cache.get_group_cache(group_name) {
-            if cached_result.files.len() > 0 && cached_result.files.iter().all(|f| {
-                files.iter().any(|file| {
-                    file == &f.path
-                })
-            }) {
+            if cached_result.files.len() > 0
+                && cached_result
+                    .files
+                    .iter()
+                    .all(|f| files.iter().any(|file| file == &f.path))
+            {
                 return Ok(merger::GroupStats {
                     status: merger::GroupStatus::Skipped,
                     processing_time: std::time::Duration::from_secs(0),
