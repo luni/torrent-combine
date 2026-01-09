@@ -194,7 +194,7 @@ jobs:
         ./target/release/torrent-combine test-data --exclude test-data/dir2 --min-size 1 --verbose
 
         # Test with multiple options
-        ./target/release/torrent-combine test-data --src test-data/readonly --exclude test-data/dir2 --extensions mkv --min-size 1 --verbose
+        ./target/release/torrent-combine test-data --src test-data/readonly --exclude test-data/dir2 --ext mkv --min-size 1 --verbose
 
         # Test with multiple root directories
         ./target/release/torrent-combine test-data/dir1 test-data/dir2 --min-size 1 --verbose
