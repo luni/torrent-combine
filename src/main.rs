@@ -293,6 +293,7 @@ fn main() -> io::Result<()> {
     let groups_processed = Arc::new(AtomicUsize::new(0));
     let merged_groups_count = Arc::new(AtomicUsize::new(0));
     let skipped_groups_count = Arc::new(AtomicUsize::new(0));
+    let pb_shared = Arc::new(pb);
 
     groups_to_process
         .into_par_iter()
@@ -300,6 +301,7 @@ fn main() -> io::Result<()> {
             let groups_processed_cloned = Arc::clone(&groups_processed);
             let merged_groups_count_cloned = Arc::clone(&merged_groups_count);
             let skipped_groups_count_cloned = Arc::clone(&skipped_groups_count);
+            let pb_cloned = Arc::clone(&pb_shared);
 
             let group_name = match &group_key {
                 GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
@@ -309,7 +311,8 @@ fn main() -> io::Result<()> {
 
             match merger::process_group_with_dry_run(&paths, &group_name, args.replace, &args.src_dirs, args.dry_run, args.no_mmap) {
                 Ok(stats) => {
-                    groups_processed_cloned.fetch_add(1, Ordering::SeqCst);
+                    let processed_count = groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
+                    pb_cloned.set_position(processed_count as u64);
 
                     match stats.status {
                         merger::GroupStatus::Merged => {
@@ -376,6 +379,8 @@ fn main() -> io::Result<()> {
             }
         });
 
+    // Extract the progress bar from Arc to finish it
+    let pb = Arc::try_unwrap(pb_shared).expect("Failed to unwrap progress bar");
     pb.finish_with_message("Processing complete");
 
     let final_processed = groups_processed.load(Ordering::SeqCst);
