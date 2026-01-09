@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Strip binary
+      run: strip target/release/torrent-combine
+
+    - name: Create release archive
+      run: |
+        mkdir -p release
+        cp target/release/torrent-combine release/
+        cp README.md release/
+        cp LICENSE release/
+        tar czf torrent-combine-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz -C release .
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: torrent-combine-*.tar.gz
+        draft: false
+        prerelease: false
+        generate_release_notes: true

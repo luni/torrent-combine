@@ -1,5 +1,10 @@
 # Torrent Combine
 
+[![CI](https://github.com/mason-larobina/torrent-combine/workflows/test/badge.svg)](https://github.com/mason-larobina/torrent-combine/actions/workflows/test.yml)
+[![Coverage](https://codecov.io/gh/mason-larobina/torrent-combine/branch/main/graph/badge.svg)](https://codecov.io/gh/mason-larobina/torrent-combine)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Crates.io](https://img.shields.io/crates/v/torrent-combine.svg)](https://crates.io/crates/torrent-combine)
+
 A high-performance Rust CLI tool to merge partially downloaded torrent files (e.g., videos) within a directory tree. It groups files by name and size, performs sanity checks for compatibility, and merges them using bitwise OR on their contents. Features intelligent caching, progress bars, and robust error handling.
 
 ## Description
@@ -73,7 +78,8 @@ torrent-combine /path/to/torrent/root/dir
 
 ### Source Directory Options
 - `--src-dirs <DIR>`: Specify source directories to treat as read-only (can be used multiple times)
-- `--min-file-size <SIZE>`: Minimum file size to process (e.g., `10MB`, `1GB`, `1048576`). Default: 1MB
+- `--exclude <DIR>`: Exclude directories from scanning (can be used multiple times)
+- `--min-file-size <SIZE>`: Minimum file size to process (e.g., `10MB`, `1GB`, `1048576'). Default: 1MB
 
 ### Output Options
 - `--verbose`: Enable verbose logging (may interfere with progress bar)
@@ -130,9 +136,17 @@ torrent-combine /downloads --src-dirs /readonly/torrents
 
 # Multiple source directories (can be used multiple times)
 torrent-combine /downloads --src-dirs /readonly/torrents --src-dirs /backup/torrents --src-dirs /archive/torrents
+
+# Exclude directories from scanning
+torrent-combine /downloads --exclude /downloads/temp --exclude /downloads/incomplete
+
+# Combine source and exclude options
+torrent-combine /downloads --src-dirs /readonly/torrents --exclude /downloads/temp --exclude /downloads/cache
 ```
 
 Treat files in specified directories as read-only sources (won't be modified). This is useful when you have completed downloads in one location and want to use them as sources to fix incomplete downloads in another location.
+
+The `--exclude` option prevents scanning of specified directories and all their subdirectories, which is useful for skipping temporary files, cache directories, or incomplete downloads.
 
 ### In-place Replacement
 
@@ -235,6 +249,34 @@ Processing complete
 ## Contributing
 
 Fork the repo, make changes, and submit a pull request. See [CONVENTIONS.md](CONVENTIONS.md) for coding standards.
+
+### CI/CD
+
+This project uses GitHub Actions for continuous integration and deployment:
+
+- **Automated Testing**: All PRs and pushes to `main` trigger comprehensive test suites
+- **Cross-Platform Testing**: Tests run on Ubuntu, macOS, and Windows
+- **Security Auditing**: Automated vulnerability scanning with `cargo audit`
+- **Performance Benchmarks**: Performance tracking on every push to `main`
+- **Code Coverage**: Coverage reporting with Codecov integration
+- **Release Automation**: Automatic releases when tags are pushed
+
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Ensure all tests pass (`cargo test`)
+5. Run formatting checks (`cargo fmt --check`)
+6. Run clippy (`cargo clippy`)
+7. Submit a pull request
+
+The CI system will automatically:
+- Run the full test suite across multiple platforms
+- Check code formatting and linting
+- Perform security audits
+- Generate coverage reports
+- Run performance benchmarks
 
 ## License
 

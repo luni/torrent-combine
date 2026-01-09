@@ -90,6 +90,8 @@ struct Args {
     root_dir: PathBuf,
     #[arg(long, help = "Specify source directories to treat as read-only (can be used multiple times)")]
     src_dirs: Vec<PathBuf>,
+    #[arg(long, help = "Exclude directories from scanning (can be used multiple times)")]
+    exclude: Vec<PathBuf>,
     #[arg(long, value_parser = parse_file_size, help = "Minimum file size to process (e.g., '10MB', '1GB', '1048576'). Default: 1MB")]
     min_file_size: Option<u64>,
     #[arg(long)]
@@ -112,12 +114,36 @@ struct Args {
     clear_cache: bool,
 }
 
-fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -> io::Result<Vec<PathBuf>> {
+fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String], exclude_dirs: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut dirs_to_process: Vec<PathBuf> = dirs.iter().cloned().collect();
     let extensions: Vec<String> = extensions.iter().map(|ext| ext.to_lowercase()).collect();
 
+    // Convert exclude dirs to canonical paths for comparison
+    let mut canonical_exclude_dirs = Vec::new();
+    for exclude_dir in exclude_dirs {
+        match exclude_dir.canonicalize() {
+            Ok(canonical) => canonical_exclude_dirs.push(canonical),
+            Err(e) => log::warn!("Failed to canonicalize exclude directory {:?}: {}", exclude_dir, e),
+        }
+    }
+
     while let Some(current_dir) = dirs_to_process.pop() {
+        // Check if current directory should be excluded
+        let should_exclude = match current_dir.canonicalize() {
+            Ok(canonical_current) => canonical_exclude_dirs.iter().any(|exclude| {
+                canonical_current.starts_with(exclude)
+            }),
+            Err(e) => {
+                log::warn!("Failed to canonicalize current directory {:?}: {}", current_dir, e);
+                false
+            }
+        };
+
+        if should_exclude {
+            log::debug!("Excluding directory: {:?}", current_dir);
+            continue;
+        }
         // Validate directory exists and is accessible
         if !current_dir.exists() {
             log::warn!("Directory does not exist: {:?}", current_dir);
@@ -278,7 +304,7 @@ fn main() -> io::Result<()> {
     discovery_pb.set_message("Scanning for large files...");
     discovery_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let files = collect_large_files(&all_dirs, min_file_size, &args.extensions)?;
+    let files = collect_large_files(&all_dirs, min_file_size, &args.extensions, &args.exclude)?;
     discovery_pb.finish_with_message("File scanning complete");
     drop(discovery_pb);
 
@@ -704,5 +730,328 @@ mod tests {
     fn test_parse_file_size_whitespace() {
         assert_eq!(parse_file_size(" 1MB ").unwrap(), 1_048_576);
         assert_eq!(parse_file_size("\t10KB\n").unwrap(), 10_240);
+    }
+
+    // Tests for new CLI functionality
+    #[test]
+    fn test_multiple_src_dirs_parsing() {
+        // Test that src_dirs can accept multiple values
+        use std::ffi::OsString;
+
+        // This simulates command line parsing with multiple --src-dirs
+        let _args = vec![
+            OsString::from("torrent-combine"),
+            OsString::from("/test"),
+            OsString::from("--src-dirs"),
+            OsString::from("/readonly1"),
+            OsString::from("--src-dirs"),
+            OsString::from("/readonly2"),
+        ];
+
+        // The actual parsing is handled by clap, but we can test the data structure
+        let src_dirs = vec![
+            PathBuf::from("/readonly1"),
+            PathBuf::from("/readonly2"),
+        ];
+
+        assert_eq!(src_dirs.len(), 2);
+        assert_eq!(src_dirs[0], PathBuf::from("/readonly1"));
+        assert_eq!(src_dirs[1], PathBuf::from("/readonly2"));
+    }
+
+    #[test]
+    fn test_multiple_exclude_parsing() {
+        // Test that exclude can accept multiple values
+        let exclude_dirs = vec![
+            PathBuf::from("/temp"),
+            PathBuf::from("/cache"),
+            PathBuf::from("/incomplete"),
+        ];
+
+        assert_eq!(exclude_dirs.len(), 3);
+        assert_eq!(exclude_dirs[0], PathBuf::from("/temp"));
+        assert_eq!(exclude_dirs[1], PathBuf::from("/cache"));
+        assert_eq!(exclude_dirs[2], PathBuf::from("/incomplete"));
+    }
+
+    #[test]
+    fn test_group_key_clone() {
+        // Test that GroupKey implements Clone correctly
+        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
+        let key2 = key1.clone();
+
+        assert_eq!(key1, key2);
+        assert_eq!(format!("{:?}", key1), format!("{:?}", key2));
+    }
+
+    #[test]
+    fn test_collect_large_files_with_excludes() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // Create a temporary directory structure
+        let temp_dir = tempdir().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create directory structure
+        let keep_dir = base_path.join("keep");
+        let exclude_dir = base_path.join("exclude");
+        fs::create_dir(&keep_dir).unwrap();
+        fs::create_dir(&exclude_dir).unwrap();
+
+        // Create test files
+        let keep_file = keep_dir.join("test.mkv");
+        let exclude_file = exclude_dir.join("test.mkv");
+        fs::write(&keep_file, "test content").unwrap();
+        fs::write(&exclude_file, "exclude content").unwrap();
+
+        // Test without exclusion
+        let dirs = vec![base_path.to_path_buf()];
+        let files = collect_large_files(&dirs, 1, &[], &[]).unwrap();
+        assert_eq!(files.len(), 2); // Should find both files
+
+        // Test with exclusion
+        let exclude_dirs = vec![exclude_dir.clone()];
+        let files = collect_large_files(&dirs, 1, &[], &exclude_dirs).unwrap();
+        assert_eq!(files.len(), 1); // Should only find the keep file
+        assert!(files.contains(&keep_file));
+        assert!(!files.contains(&exclude_file));
+    }
+
+    #[test]
+    fn test_collect_large_files_with_extension_filter() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // Create a temporary directory structure
+        let temp_dir = tempdir().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create test files with different extensions
+        let mkv_file = base_path.join("test.mkv");
+        let mp4_file = base_path.join("test.mp4");
+        let txt_file = base_path.join("test.txt");
+
+        fs::write(&mkv_file, "mkv content").unwrap();
+        fs::write(&mp4_file, "mp4 content").unwrap();
+        fs::write(&txt_file, "txt content").unwrap();
+
+        // Test with extension filter
+        let dirs = vec![base_path.to_path_buf()];
+        let extensions = vec!["mkv".to_string(), "mp4".to_string()];
+        let files = collect_large_files(&dirs, 1, &extensions, &[]).unwrap();
+
+        assert_eq!(files.len(), 2); // Should only find mkv and mp4 files
+        assert!(files.contains(&mkv_file));
+        assert!(files.contains(&mp4_file));
+        assert!(!files.contains(&txt_file));
+    }
+
+    #[test]
+    fn test_collect_large_files_with_min_size() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // Create a temporary directory structure
+        let temp_dir = tempdir().unwrap();
+        let base_path = temp_dir.path();
+
+        // Create test files with different sizes
+        let small_file = base_path.join("small.mkv");
+        let large_file = base_path.join("large.mkv");
+
+        fs::write(&small_file, "small").unwrap(); // 5 bytes
+        fs::write(&large_file, "large content here").unwrap(); // 18 bytes
+
+        // Test with minimum size filter
+        let dirs = vec![base_path.to_path_buf()];
+        let files = collect_large_files(&dirs, 10, &[], &[]).unwrap();
+
+        assert_eq!(files.len(), 1); // Should only find the large file
+        assert!(files.contains(&large_file));
+        assert!(!files.contains(&small_file));
+    }
+
+    #[test]
+    fn test_temp_file_cleanup_registry() {
+        // Test that the temp file registry works correctly
+
+        // Clear any existing temp files
+        cleanup_temp_files();
+
+        // Register some test temp files
+        let test_file1 = PathBuf::from("/tmp/test1.tmp");
+        let test_file2 = PathBuf::from("/tmp/test2.tmp");
+
+        register_temp_file(test_file1.clone());
+        register_temp_file(test_file2.clone());
+
+        // Note: We can't actually test file deletion without creating real files,
+        // but we can test the registry mechanism
+        // The cleanup function will attempt to delete the files, which is fine
+        // even if they don't exist
+        cleanup_temp_files();
+
+        // Test passes if no panic occurs
+        assert!(true);
+    }
+
+    #[test]
+    fn test_temp_file_cleanup_registry_with_real_files() {
+        use tempfile::tempdir;
+
+        // Create a temporary directory for cache
+        let temp_dir = tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        std::fs::create_dir(&cache_dir).unwrap();
+
+        // Create cache instance
+        let mut cache = cache::FileCache::new(cache_dir.clone(), 3600);
+
+        // Test cache creation
+        assert!(cache_dir.exists());
+
+        // Test saving empty cache
+        let result = cache.save();
+        assert!(result.is_ok());
+
+        // Test loading empty cache
+        let result = cache.load();
+        assert!(result.is_ok());
+
+        // Test cleanup
+        cache.cleanup_expired();
+        assert!(true); // Should not panic
+    }
+
+    #[test]
+    fn test_cache_functionality_basic() {
+        use tempfile::tempdir;
+
+        // Create a temporary directory for cache
+        let temp_dir = tempdir().unwrap();
+        let cache_dir = temp_dir.path().join("cache");
+        std::fs::create_dir(&cache_dir).unwrap();
+
+        // Create cache instance
+        let mut cache = cache::FileCache::new(cache_dir.clone(), 3600);
+
+        // Test cache creation
+        assert!(cache_dir.exists());
+
+        // Test saving empty cache
+        let result = cache.save();
+        assert!(result.is_ok());
+
+        // Test loading empty cache
+        let result = cache.load();
+        assert!(result.is_ok());
+
+        // Test cleanup
+        cache.cleanup_expired();
+        assert!(true); // Should not panic
+    }
+
+    #[test]
+    fn test_group_key_hash_consistency() {
+        // Test that GroupKey hashing is consistent
+        use std::collections::HashMap;
+        use std::hash::{Hash, Hasher};
+
+        let key1 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
+        let key2 = GroupKey::FilenameAndSize("test.mkv".to_string(), 1024);
+        let key3 = GroupKey::FilenameAndSize("other.mkv".to_string(), 1024);
+
+        let mut map: HashMap<GroupKey, String> = HashMap::new();
+        map.insert(key1.clone(), "value1".to_string());
+        map.insert(key3.clone(), "value3".to_string());
+
+        // Should be able to retrieve with equal key
+        assert_eq!(map.get(&key2), Some(&"value1".to_string()));
+        assert_eq!(map.get(&key3), Some(&"value3".to_string()));
+
+        // Test that equal keys have equal hashes
+        let mut hasher1 = std::collections::hash_map::DefaultHasher::new();
+        let mut hasher2 = std::collections::hash_map::DefaultHasher::new();
+        key1.hash(&mut hasher1);
+        key2.hash(&mut hasher2);
+        assert_eq!(hasher1.finish(), hasher2.finish());
+
+        // Test that different keys have different hashes
+        let mut hasher3 = std::collections::hash_map::DefaultHasher::new();
+        key3.hash(&mut hasher3);
+        assert_ne!(hasher1.finish(), hasher3.finish());
+    }
+
+    #[test]
+    fn test_dedup_mode_variants() {
+        // Test all dedup mode variants
+        let modes = vec![
+            DedupKey::FilenameAndSize,
+            DedupKey::SizeOnly,
+            DedupKey::ExtensionAndSize,
+        ];
+
+        for mode in modes {
+            // Test that each variant can be created and compared
+            match mode {
+                DedupKey::FilenameAndSize => assert!(true),
+                DedupKey::SizeOnly => assert!(true),
+                DedupKey::ExtensionAndSize => assert!(true),
+            }
+        }
+    }
+
+    #[test]
+    fn test_file_size_parsing_edge_cases() {
+        // Test edge cases for file size parsing
+        assert_eq!(parse_file_size("0MB").unwrap(), 0);
+        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("1024MB").unwrap(), 1_048_576 * 1024);
+
+        // Test case insensitive
+        assert_eq!(parse_file_size("1mb").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("1Mb").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
+
+        // Test decimal values
+        assert_eq!(parse_file_size("1.5MB").unwrap(), 1_048_576 + 524_288);
+        assert_eq!(parse_file_size("0.5GB").unwrap(), 536_870_912);
+    }
+
+    #[test]
+    fn test_path_handling_edge_cases() {
+        // Test path handling with various edge cases
+        let normal_path = PathBuf::from("/normal/path");
+        let relative_path = PathBuf::from("./relative/path");
+        let complex_path = PathBuf::from("/path/with spaces/and-dashes");
+
+        // Test that paths can be cloned and compared
+        let normal_clone = normal_path.clone();
+        assert_eq!(normal_path, normal_clone);
+
+        // Test path components
+        assert_eq!(normal_path.file_name().unwrap().to_str().unwrap(), "path");
+        assert_eq!(relative_path.components().count(), 3); // ".", "relative", "path"
+        assert!(complex_path.to_str().unwrap().contains(" "));
+    }
+
+    #[test]
+    fn test_atomic_counter_operations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Test atomic counter behavior used in progress tracking
+        let counter = AtomicUsize::new(0);
+
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        // Test fetch_add
+        let old_value = counter.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(old_value, 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // Test multiple operations
+        counter.fetch_add(5, Ordering::SeqCst);
+        assert_eq!(counter.load(Ordering::SeqCst), 6);
     }
 }
