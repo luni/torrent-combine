@@ -4,45 +4,46 @@ This directory contains the CI/CD workflows for torrent-combine.
 
 ## Workflows
 
-### `test.yml`
+### `ci.yml` - Comprehensive CI Pipeline
 - **Triggers**: Push to `main`, Pull Requests to `main`
-- **Purpose**: Fast feedback on code changes
+- **Purpose**: Complete CI pipeline with all checks
 - **Jobs**:
-  - Build project
-  - Run all tests
-  - Check code formatting (`cargo fmt`)
-  - Run clippy lints
+  - Multi-version Rust testing (stable, beta, 1.81.0)
+  - Security audit using `cargo audit`
+  - Performance benchmarks with regression detection
+  - Cross-platform integration tests (Ubuntu, macOS, Windows)
+  - Code coverage reporting
 
-### `security.yml`
+### `coverage.yml` - Code Coverage
+- **Triggers**: Push to `main`, Pull Requests to `main`
+- **Purpose**: Code coverage reporting
+- **Jobs**:
+  - Generate coverage report using `cargo llvm-cov`
+  - Upload to Codecov with GitHub token
+
+### `release.yml` - Automated Releases
+- **Triggers**: Tags (e.g., `v1.0.0`)
+- **Purpose**: Automated release process
+- **Jobs**:
+  - Build release binary
+  - Create GitHub release
+  - Upload release artifacts
+
+### `badge.yml` - Status Badge
+- **Triggers**: Push to `main`, Pull Requests to `main`
+- **Purpose**: Generate build status badge
+- **Jobs**:
+  - Build and test project
+  - Update status badge
+
+### `security-audit.yml` - Enhanced Security
 - **Triggers**: Push to `main`, Pull Requests to `main`, Monthly schedule
-- **Purpose**: Security vulnerability scanning
+- **Purpose**: Comprehensive security scanning
 - **Jobs**:
   - Security audit using `cargo audit`
-
-### `bench.yml`
-- **Triggers**: Push to `main`
-- **Purpose**: Performance benchmarking
-- **Jobs**:
-  - Run performance benchmarks
-  - Upload benchmark results as artifacts
-
-### `integration.yml`
-- **Triggers**: Push to `main`, Pull Requests to `main`
-- **Purpose**: Cross-platform integration testing
-- **Jobs**:
-  - Test on Ubuntu, macOS, and Windows
-  - Build release binary
-  - Test binary functionality with real data
-
-### `ci.yml`
-- **Triggers**: Push to `main`, Pull Requests to `main`
-- **Purpose**: Comprehensive CI pipeline
-- **Jobs**:
-  - Multi-version Rust testing
-  - Security audit
-  - Performance benchmarks
-  - Cross-platform integration tests
-  - Code coverage reporting
+  - Vulnerable GitHub Actions detection
+  - Secret scanning
+  - File permission audit
 
 ## Caching
 
@@ -60,12 +61,15 @@ Code coverage is collected on pushes to `main` and uploaded to Codecov for track
 - Automated security audits run on all PRs and pushes
 - Monthly security scans for vulnerability detection
 - Uses `cargo audit` to check for known vulnerabilities in dependencies
+- Scans for vulnerable GitHub Actions
+- Detects hardcoded secrets and file permission issues
 
 ## Performance
 
-- Benchmarks run on every push to `main`
+- Benchmarks run on every push to `main` and pull requests
 - Results are stored as GitHub artifacts
-- Performance regressions can be detected over time
+- Performance regression detection for PRs
+- Comments on PRs with performance comparisons
 
 ## Integration Testing
 
@@ -81,3 +85,18 @@ Integration tests include:
 - Caching system
 - Dry run mode
 - CLI option combinations
+
+## Workflow Permissions
+
+All workflows have proper permissions:
+- **contents: read**: Access repository contents
+- **checks: write**: Post check results and comments
+- **pull-requests: write**: Comment on PRs and upload artifacts
+
+## Benefits of Consolidation
+
+- **Reduced Complexity**: Fewer workflows to maintain
+- **Consistent Permissions**: Uniform permission handling
+- **Better Resource Usage**: More efficient CI runs
+- **Easier Maintenance**: Single source of truth for CI logic
+- **Comprehensive Testing**: All checks in one place
