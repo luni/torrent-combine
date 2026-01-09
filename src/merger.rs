@@ -1019,8 +1019,8 @@ mod tests {
         let file1 = temp_dir.path().join("file1.bin");
         let file2 = temp_dir.path().join("file2.bin");
 
-        fs::write(&file1, &[0x12, 0x34, 0x00, 0x56])?;
-        fs::write(&file2, &[0x00, 0x34, 0x78, 0x00])?;
+        fs::write(&file1, [0x12, 0x34, 0x00, 0x56])?;
+        fs::write(&file2, [0x00, 0x34, 0x78, 0x00])?;
 
         // Create memory maps
         let mmap1 = unsafe { MmapOptions::new().map(&File::open(&file1)?)? };
@@ -1045,8 +1045,8 @@ mod tests {
         let file1 = temp_dir.path().join("file1.bin");
         let file2 = temp_dir.path().join("file2.bin");
 
-        fs::write(&file1, &[0x12, 0x34, 0x00, 0x56])?;
-        fs::write(&file2, &[0x00, 0x34, 0x78, 0x00])?;
+        fs::write(&file1, [0x12, 0x34, 0x00, 0x56])?;
+        fs::write(&file2, [0x00, 0x34, 0x78, 0x00])?;
 
         // Create memory maps
         let mmap1 = unsafe { MmapOptions::new().map(&File::open(&file1)?)? };
@@ -1074,8 +1074,8 @@ mod tests {
         let file1 = temp_dir.path().join("file1.bin");
         let file2 = temp_dir.path().join("file2.bin");
 
-        fs::write(&file1, &[0x12, 0x34, 0x56, 0x78])?;
-        fs::write(&file2, &[0x87, 0x65, 0x43, 0x21])?;
+        fs::write(&file1, [0x12, 0x34, 0x56, 0x78])?;
+        fs::write(&file2, [0x87, 0x65, 0x43, 0x21])?;
 
         // Create memory maps
         let mmap1 = unsafe { MmapOptions::new().map(&File::open(&file1)?)? };

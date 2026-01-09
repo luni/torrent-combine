@@ -327,7 +327,7 @@ mod tests {
         let files = collect_large_files(&dirs, 0, &[], &[])?;
 
         // Should find both files since min_size is 0, but empty files might be filtered out
-        assert!(files.len() >= 1);
+        assert!(!files.is_empty());
         assert!(files.contains(&small_file));
         // Empty file might or might not be included depending on implementation
 

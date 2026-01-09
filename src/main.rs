@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for result in results {
         match result {
             Ok(stats) => {
-                if stats.merged_files.len() > 0 {
+                if !stats.merged_files.is_empty() {
                     total_merged += stats.merged_files.len();
                     println!("Merged {} files for group", stats.merged_files.len());
                 } else {
@@ -145,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 fn process_group(
     group_name: &str,
-    files: &Vec<PathBuf>,
+    files: &[PathBuf],
     args: &Args,
     cache_dir: PathBuf,
     dry_run: bool,
@@ -156,7 +156,7 @@ fn process_group(
     // Check cache first
     if !args.no_cache {
         if let Some(cached_result) = cache.get_group_cache(group_name) {
-            if cached_result.files.len() > 0
+            if !cached_result.files.is_empty()
                 && cached_result
                     .files
                     .iter()
