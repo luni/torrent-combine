@@ -55,13 +55,17 @@ impl FileFilter {
     fn is_in_src_dir(&self, path: &Path) -> bool {
         let canonical_path = match path.canonicalize() {
             Ok(p) => p,
-            Err(_) => return false,
+            Err(e) => {
+                debug!("Failed to canonicalize path {:?}: {}", path, e);
+                return false;
+            }
         };
 
         self.src_dirs.iter().any(|src_dir| {
             if let Ok(canonical_src) = src_dir.canonicalize() {
                 canonical_path.starts_with(canonical_src)
             } else {
+                debug!("Failed to canonicalize src dir: {:?}", src_dir);
                 false
             }
         })
@@ -456,9 +460,27 @@ pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mm
         // Memory-mapped implementation
         let mut mmaps: Vec<Mmap> = Vec::with_capacity(paths.len());
         for p in paths {
-            let file = File::open(p)?;
-            let mmap = unsafe { MmapOptions::new().map(&file)? };
-            mmaps.push(mmap);
+            match File::open(p) {
+                Ok(file) => {
+                    match unsafe { MmapOptions::new().map(&file) } {
+                        Ok(mmap) => mmaps.push(mmap),
+                        Err(e) => {
+                            error!("Failed to create memory map for {:?}: {}", p, e);
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("Memory mapping failed for {:?}: {}", p, e)
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to open file {:?} for memory mapping: {}", p, e);
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to open file for memory mapping {:?}: {}", p, e)
+                    ));
+                }
+            }
         }
 
         let mut is_complete = vec![true; paths.len()];
@@ -469,14 +491,25 @@ pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mm
             let chunk_size = ((size - processed) as usize).min(BUFFER_SIZE);
             let or_chunk_slice = &mut or_chunk[..chunk_size];
 
+            // Validate bounds before accessing memory-mapped data
+            let processed_usize = processed as usize;
+            if processed_usize + chunk_size > mmaps[0].len() {
+                error!("Memory mapping bounds check failed: processed={}, chunk_size={}, mmap_len={}",
+                       processed_usize, chunk_size, mmaps[0].len());
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Memory mapping bounds exceeded"
+                ));
+            }
+
             // Copy first file's chunk to or_chunk
-            or_chunk_slice.copy_from_slice(&mmaps[0][processed as usize..processed as usize + chunk_size]);
+            or_chunk_slice.copy_from_slice(&mmaps[0][processed_usize..processed_usize + chunk_size]);
 
             // Perform byte merge with memory-mapped data
-            perform_byte_merge_mmap(&mmaps, or_chunk_slice, processed as usize, chunk_size);
+            perform_byte_merge_mmap(&mmaps, or_chunk_slice, processed_usize, chunk_size);
 
             // Validate sanity check
-            if !validate_sanity_check_mmap(&mmaps, or_chunk_slice, &mut is_complete, processed as usize, chunk_size)? {
+            if !validate_sanity_check_mmap(&mmaps, or_chunk_slice, &mut is_complete, processed_usize, chunk_size)? {
                 return Ok(None);
             }
 
@@ -491,7 +524,16 @@ pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mm
         // Original buffered I/O implementation
         let mut readers: Vec<BufReader<File>> = Vec::with_capacity(paths.len());
         for p in paths {
-            readers.push(BufReader::new(File::open(p)?));
+            match File::open(p) {
+                Ok(file) => readers.push(BufReader::new(file)),
+                Err(e) => {
+                    error!("Failed to open file {:?} for reading: {}", p, e);
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Failed to open file for reading {:?}: {}", p, e)
+                    ));
+                }
+            }
         }
 
         let mut buffers: Vec<Vec<u8>> = (0..paths.len()).map(|_| vec![0; BUFFER_SIZE]).collect();
@@ -505,7 +547,16 @@ pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mm
             let or_chunk_slice = &mut or_chunk[..chunk_size];
 
             for (i, reader) in readers.iter_mut().enumerate() {
-                reader.read_exact(&mut buffers_slice[i][..chunk_size])?;
+                match reader.read_exact(&mut buffers_slice[i][..chunk_size]) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("Failed to read from file {} at offset {}: {}", i, processed, e);
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("Failed to read from file at offset {}: {}", processed, e)
+                        ));
+                    }
+                }
             }
 
             perform_byte_merge(buffers_slice, or_chunk_slice);

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use log::error;
 use rayon::prelude::*;
+use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod merger;
 
@@ -78,21 +79,58 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -
     let extensions: Vec<String> = extensions.iter().map(|ext| ext.to_lowercase()).collect();
 
     while let Some(current_dir) = dirs_to_process.pop() {
-        for entry in fs::read_dir(&current_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                dirs_to_process.push(path);
-            } else if let Ok(metadata) = fs::metadata(&path) {
-                if metadata.len() > min_size {
-                    // Check extension filter
-                    if extensions.is_empty() || path.extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| extensions.contains(&ext.to_lowercase()))
-                        .unwrap_or(false) {
-                        files.push(path);
+        // Validate directory exists and is accessible
+        if !current_dir.exists() {
+            log::warn!("Directory does not exist: {:?}", current_dir);
+            continue;
+        }
+
+        if !current_dir.is_dir() {
+            log::warn!("Path is not a directory: {:?}", current_dir);
+            continue;
+        }
+
+        match fs::read_dir(&current_dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => {
+                            let path = entry.path();
+
+                            // Skip problematic paths
+                            if let Some(path_str) = path.to_str() {
+                                if path_str.contains('\0') {
+                                    log::warn!("Skipping path with null bytes: {:?}", path);
+                                    continue;
+                                }
+                            }
+
+                            if path.is_dir() {
+                                dirs_to_process.push(path);
+                            } else if let Ok(metadata) = fs::metadata(&path) {
+                                if metadata.len() > min_size {
+                                    // Check extension filter
+                                    if extensions.is_empty() || path.extension()
+                                        .and_then(|ext| ext.to_str())
+                                        .map(|ext| extensions.contains(&ext.to_lowercase()))
+                                        .unwrap_or(false) {
+                                        files.push(path);
+                                    }
+                                }
+                            } else {
+                                log::warn!("Failed to read metadata for: {:?}", path);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to read directory entry: {:?} (error: {})", current_dir, e);
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                log::error!("Failed to read directory {:?}: {}", current_dir, e);
+                // Continue with other directories instead of failing completely
+                continue;
             }
         }
     }
@@ -110,6 +148,33 @@ fn main() -> io::Result<()> {
     if args.dry_run {
         log::info!("DRY-RUN MODE: No files will be modified. Showing what would happen.");
     }
+
+    // Validate root directory
+    if !args.root_dir.exists() {
+        log::error!("Root directory does not exist: {:?}", args.root_dir);
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("Root directory does not exist: {:?}", args.root_dir)
+        ));
+    }
+
+    if !args.root_dir.is_dir() {
+        log::error!("Root path is not a directory: {:?}", args.root_dir);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Root path is not a directory: {:?}", args.root_dir)
+        ));
+    }
+
+    // Validate source directories
+    for src_dir in &args.src_dirs {
+        if !src_dir.exists() {
+            log::warn!("Source directory does not exist: {:?}", src_dir);
+        } else if !src_dir.is_dir() {
+            log::warn!("Source path is not a directory: {:?}", src_dir);
+        }
+    }
+
     log::info!("Processing root directory: {:?}", args.root_dir);
     if !args.src_dirs.is_empty() {
         log::info!("Source directories: {:?}", args.src_dirs);
@@ -126,11 +191,33 @@ fn main() -> io::Result<()> {
     all_dirs.extend(args.src_dirs.clone());
     let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
     log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
+
+    // Progress bar for file discovery
+    let discovery_pb = ProgressBar::new_spinner();
+    discovery_pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .expect("Failed to set discovery progress bar template")
+    );
+    discovery_pb.set_message("Scanning for large files...");
+
     let files = collect_large_files(&all_dirs, min_file_size, &args.extensions)?;
-    log::info!("Found {} large files", files.len());
+    discovery_pb.finish_with_message("File scanning complete");
+    drop(discovery_pb);
+
+    let files_count = files.len();
+    log::info!("Found {} large files", files_count);
 
     let mut groups: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
     for file in files {
+        // Skip files with problematic paths
+        if let Some(path_str) = file.to_str() {
+            if path_str.contains('\0') || path_str.len() > 4096 {
+                log::warn!("Skipping file with problematic path: {:?}", file);
+                continue;
+            }
+        }
+
         if let Ok(metadata) = fs::metadata(&file) {
             let size = metadata.len();
             let key = match args.dedup_mode {
@@ -138,21 +225,35 @@ fn main() -> io::Result<()> {
                     if let Some(basename) =
                         file.file_name().map(|s| s.to_string_lossy().to_string())
                     {
+                        // Validate filename is reasonable
+                        if basename.len() > 255 {
+                            log::warn!("Skipping file with very long filename: {:?}", file);
+                            continue;
+                        }
                         GroupKey::FilenameAndSize(basename, size)
                     } else {
+                        log::warn!("Skipping file without valid filename: {:?}", file);
                         continue;
                     }
                 }
                 DedupKey::SizeOnly => GroupKey::SizeOnly(size),
                 DedupKey::ExtensionAndSize => {
                     if let Some(extension) = file.extension().and_then(|ext| ext.to_str()) {
+                        // Validate extension is reasonable
+                        if extension.len() > 10 {
+                            log::warn!("Skipping file with very long extension: {:?}", file);
+                            continue;
+                        }
                         GroupKey::ExtensionAndSize(extension.to_lowercase(), size)
                     } else {
+                        log::warn!("Skipping file without valid extension: {:?}", file);
                         continue;
                     }
                 }
             };
             groups.entry(key).or_insert(Vec::new()).push(file);
+        } else {
+            log::warn!("Failed to read metadata for file: {:?}", file);
         }
     }
 
@@ -162,6 +263,16 @@ fn main() -> io::Result<()> {
         .collect();
     let total_groups = groups_to_process.len();
     log::info!("Found {} groups to process", total_groups);
+
+    // Create progress bar
+    let pb = ProgressBar::new(total_groups as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .expect("Failed to set progress bar template")
+            .progress_chars("#>-")
+    );
+    pb.set_message("Processing groups");
 
     let groups_processed = Arc::new(AtomicUsize::new(0));
     let merged_groups_count = Arc::new(AtomicUsize::new(0));
@@ -182,10 +293,7 @@ fn main() -> io::Result<()> {
 
             match merger::process_group_with_dry_run(&paths, &group_name, args.replace, &args.src_dirs, args.dry_run, args.no_mmap) {
                 Ok(stats) => {
-                    let processed_count =
-                        groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
-                    let percentage_complete =
-                        (processed_count as f64 / total_groups as f64) * 100.0;
+                    groups_processed_cloned.fetch_add(1, Ordering::SeqCst);
 
                     match stats.status {
                         merger::GroupStatus::Merged => {
@@ -193,12 +301,9 @@ fn main() -> io::Result<()> {
                             let mb_per_sec = (stats.bytes_processed as f64 / 1_048_576.0)
                                 / stats.processing_time.as_secs_f64();
                             log::info!(
-                                "[{}/{}] Group '{}' merged at {:.2} MB/s. {:.1}% complete.",
-                                processed_count,
-                                total_groups,
+                                "Group '{}' merged at {:.2} MB/s",
                                 group_name,
-                                mb_per_sec,
-                                percentage_complete
+                                mb_per_sec
                             );
                             if !stats.merged_files.is_empty() {
                                 for file in stats.merged_files {
@@ -209,20 +314,14 @@ fn main() -> io::Result<()> {
                         merger::GroupStatus::Skipped => {
                             skipped_groups_count_cloned.fetch_add(1, Ordering::SeqCst);
                             log::info!(
-                                "[{}/{}] Group '{}' skipped (all files complete). {:.1}% complete.",
-                                processed_count,
-                                total_groups,
-                                group_name,
-                                percentage_complete
+                                "Group '{}' skipped (all files complete)",
+                                group_name
                             );
                         }
                         merger::GroupStatus::Failed => {
                             log::warn!(
-                                "[{}/{}] Group '{}' failed sanity check. {:.1}% complete.",
-                                processed_count,
-                                total_groups,
-                                group_name,
-                                percentage_complete
+                                "Group '{}' failed sanity check",
+                                group_name
                             );
                         }
                     }
@@ -232,6 +331,8 @@ fn main() -> io::Result<()> {
                 }
             }
         });
+
+    pb.finish_with_message("Processing complete");
 
     let final_processed = groups_processed.load(Ordering::SeqCst);
     let final_merged = merged_groups_count.load(Ordering::SeqCst);
