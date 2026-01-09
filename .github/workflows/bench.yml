@@ -37,7 +37,7 @@ jobs:
 
     - name: Get main branch benchmark results
       if: github.event_name == 'pull_request'
-      uses: dawidd6/action-download-artifact@v3
+      uses: dawidd6/action-download-artifact@v6
       with:
         workflow: bench.yml
         branch: main
