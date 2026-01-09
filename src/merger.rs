@@ -5,7 +5,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use memmap2::{Mmap, MmapOptions};
 use tempfile::NamedTempFile;
 
@@ -357,8 +357,8 @@ pub fn process_group_with_dry_run(
             bytes_processed,
         ),
         None => {
-            let error_msg = format!("Sanity check failed for group: {}", basename);
-            error!("{}", error_msg);
+            let warn_msg = format!("Sanity check failed for group: {}", basename);
+            warn!("{}", warn_msg);
             Ok(GroupStats {
                 status: GroupStatus::Failed,
                 processing_time: start_time.elapsed(),

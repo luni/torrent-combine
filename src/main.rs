@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -91,11 +92,12 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Found {} file groups.", groups.len());
 
     // Process groups
+    let merged_count = AtomicUsize::new(0);
     let progress = ProgressBar::new(groups.len() as u64);
     progress.set_style(
         ProgressStyle::default_bar()
             .template(
-                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) Merged: {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -114,6 +116,17 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 args.dry_run,
                 &src_dirs,
             );
+
+            // Update merged count and progress bar message
+            if let Ok(ref stats) = result {
+                if !stats.merged_files.is_empty() {
+                    let current_total = merged_count
+                        .fetch_add(stats.merged_files.len(), Ordering::Relaxed)
+                        + stats.merged_files.len();
+                    progress.set_message(current_total.to_string());
+                }
+            }
+
             progress.inc(1);
             result
         })
