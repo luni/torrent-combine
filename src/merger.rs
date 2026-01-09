@@ -522,10 +522,10 @@ pub fn check_sanity_and_completes(
                     Ok(mmap) => mmaps.push(mmap),
                     Err(e) => {
                         error!("Failed to create memory map for {:?}: {}", p, e);
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("Memory mapping failed for {:?}: {}", p, e),
-                        ));
+                        return Err(io::Error::other(format!(
+                            "Memory mapping failed for {:?}: {}",
+                            p, e
+                        )));
                     }
                 },
                 Err(e) => {
