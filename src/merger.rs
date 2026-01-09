@@ -286,7 +286,8 @@ pub fn process_group_with_dry_run(
                                 (is_file_all_nulls(dst_path), file_has_data(src_path))
                             {
                                 if dst_is_nulls && src_has_data {
-                                    let match_type = if src_path.file_name() == dst_path.file_name() {
+                                    let match_type = if src_path.file_name() == dst_path.file_name()
+                                    {
                                         "exact"
                                     } else {
                                         "fuzzy"
@@ -1605,7 +1606,12 @@ mod tests {
         let target_file = target_dir.join("test.bin");
         fs::write(&target_file, b"\0\0\0\0\0\0\0\0")?;
 
-        let paths = vec![src_file1.clone(), src_file2.clone(), src_file3.clone(), target_file.clone()];
+        let paths = vec![
+            src_file1.clone(),
+            src_file2.clone(),
+            src_file3.clone(),
+            target_file.clone(),
+        ];
         let src_dirs = vec![src_dir.clone()];
 
         // Test with copy_empty_dst enabled - should handle multiple sources
