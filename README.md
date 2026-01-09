@@ -1,6 +1,6 @@
 # Torrent Combine
 
-[![CI](https://github.com/luni/torrent-combine/workflows/test/badge.svg)](https://github.com/luni/torrent-combine/actions/workflows/test.yml)
+[![CI](https://github.com/luni/torrent-combine/actions/workflows/ci.yml/badge.svg)](https://github.com/luni/torrent-combine/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/luni/torrent-combine/branch/main/graph/badge.svg)](https://codecov.io/gh/luni/torrent-combine)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Crates.io](https://img.shields.io/crates/v/torrent-combine.svg)](https://crates.io/crates/torrent-combine)

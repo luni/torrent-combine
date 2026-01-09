@@ -249,21 +249,39 @@ pub fn process_group_with_dry_run(
 
         if let Some((src_path, dst_path)) = src_dst_pair {
             // Check if filenames match (exact or fuzzy)
-            if let (Some(src_filename), Some(dst_filename)) = (src_path.file_name(), dst_path.file_name()) {
+            if let (Some(src_filename), Some(dst_filename)) =
+                (src_path.file_name(), dst_path.file_name())
+            {
                 let src_filename_str = src_filename.to_string_lossy();
                 let dst_filename_str = dst_filename.to_string_lossy();
 
-                if src_filename_str == dst_filename_str || filenames_fuzzy_match(&src_filename_str, &dst_filename_str) {
-                    let match_type = if src_filename_str == dst_filename_str { "exact" } else { "fuzzy" };
-                    info!("Filename {} match: '{}' vs '{}'", match_type, src_filename_str, dst_filename_str);
+                if src_filename_str == dst_filename_str
+                    || filenames_fuzzy_match(&src_filename_str, &dst_filename_str)
+                {
+                    let match_type = if src_filename_str == dst_filename_str {
+                        "exact"
+                    } else {
+                        "fuzzy"
+                    };
+                    info!(
+                        "Filename {} match: '{}' vs '{}'",
+                        match_type, src_filename_str, dst_filename_str
+                    );
 
                     // Check if sizes match
-                    if let (Ok(src_metadata), Ok(dst_metadata)) = (fs::metadata(src_path), fs::metadata(dst_path)) {
+                    if let (Ok(src_metadata), Ok(dst_metadata)) =
+                        (fs::metadata(src_path), fs::metadata(dst_path))
+                    {
                         if src_metadata.len() == dst_metadata.len() {
                             // Check if destination is all nulls and source has data
-                            if let (Ok(dst_is_nulls), Ok(src_has_data)) = (is_file_all_nulls(dst_path), file_has_data(src_path)) {
+                            if let (Ok(dst_is_nulls), Ok(src_has_data)) =
+                                (is_file_all_nulls(dst_path), file_has_data(src_path))
+                            {
                                 if dst_is_nulls && src_has_data {
-                                    info!("Copying source to destination: {:?} -> {:?}", src_path, dst_path);
+                                    info!(
+                                        "Copying source to destination: {:?} -> {:?}",
+                                        src_path, dst_path
+                                    );
                                     if !dry_run {
                                         fs::copy(src_path, dst_path)?;
                                     }
@@ -892,7 +910,8 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group_with_dry_run(&paths, "video.mkv", false, &[], false, false, false)?;
+        let stats =
+            process_group_with_dry_run(&paths, "video.mkv", false, &[], false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -967,7 +986,8 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group_with_dry_run(&paths, "video.mkv", true, &[], false, false, false)?;
+        let stats =
+            process_group_with_dry_run(&paths, "video.mkv", true, &[], false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
 
@@ -1379,7 +1399,8 @@ mod tests {
 
         let paths = vec![file1, file2];
         let src_dirs = vec![readonly_dir];
-        let stats = process_group_with_dry_run(&paths, "test", false, &src_dirs, false, false, false)?;
+        let stats =
+            process_group_with_dry_run(&paths, "test", false, &src_dirs, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
         assert_eq!(stats.merged_files.len(), 0);
@@ -1427,7 +1448,8 @@ mod tests {
         let src_dirs = vec![src_dir.clone()];
 
         // Test with copy_empty_dst enabled
-        let stats = process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true)?;
+        let stats =
+            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -1497,12 +1519,15 @@ mod tests {
 
         // No match (less than 80% similarity)
         assert!(!filenames_fuzzy_match("video.mkv", "vdo.mkv")); // 2 deletions = 7/9 = 77.8%
-        assert!(!filenames_fuzzy_match("completely_different.txt", "other_file.txt"));
+        assert!(!filenames_fuzzy_match(
+            "completely_different.txt",
+            "other_file.txt"
+        ));
 
         // Too short for fuzzy matching (less than 5 chars)
         assert!(!filenames_fuzzy_match("test", "tst")); // 4 chars, no fuzzy
         assert!(!filenames_fuzzy_match("abc", "abd")); // 3 chars, no fuzzy
-        // Edge case: exactly 5 characters with 1 difference = 80% match
+                                                       // Edge case: exactly 5 characters with 1 difference = 80% match
         assert!(filenames_fuzzy_match("abcde", "abxde")); // 1/5 = 80% match
     }
 
@@ -1540,7 +1565,8 @@ mod tests {
         let src_dirs = vec![src_dir.clone()];
 
         // Test with copy_empty_dst enabled - should match fuzzily
-        let stats = process_group_with_dry_run(&paths, "vido.mkv", false, &src_dirs, false, false, true)?;
+        let stats =
+            process_group_with_dry_run(&paths, "vido.mkv", false, &src_dirs, false, false, true)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
