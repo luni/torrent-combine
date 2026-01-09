@@ -91,6 +91,7 @@ torrent-combine /path/to/torrent/root/dir
 
 ### Copy Options
 - `--copy-empty-dst`: Copy source to destination when filename and size match, destination is empty (null bytes only), and source contains data. Supports fuzzy filename matching (80% similarity, min 5 characters)
+- `--only-copy-empty`: Only run copy_empty_dst logic, skip normal merging process. This option requires --copy-empty-dst to be useful
 
 ### Output Options
 - `--verbose`: Enable verbose logging (may interfere with progress bar)
@@ -228,6 +229,9 @@ torrent-combine /downloads --src /complete/torrents --src /backup/torrents --cop
 
 # Dry run to preview what would be copied
 torrent-combine /downloads --src /complete/torrents --copy-empty-dst --dry-run
+
+# Only copy empty files, skip normal merging
+torrent-combine /downloads --src /complete/torrents --copy-empty-dst --only-copy-empty
 ```
 
 The `--copy-empty-dst` option is useful when:
@@ -235,6 +239,12 @@ The `--copy-empty-dst` option is useful when:
 - Target directory has pre-allocated files (all null bytes) with similar names
 - You want to copy complete data to replace empty files
 - You have multiple sources for the same file (e.g., multiple torrent directories)
+
+The `--only-copy-empty` option is useful when:
+- You only want to perform the copy_empty_dst functionality
+- You want to skip the normal merging process entirely
+- You have a large dataset and want to focus only on copying complete files to empty destinations
+- You want to run a faster operation that only handles file copying, not complex merging
 
 **Fuzzy Matching Examples:**
 - `"video.mkv"` ↔ `"vido.mkv"` ✅ (88.9% similarity)

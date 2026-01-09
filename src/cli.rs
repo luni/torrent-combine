@@ -56,6 +56,10 @@ pub struct Args {
     #[arg(long)]
     pub copy_empty_dst: bool,
 
+    /// Only run copy_empty_dst logic, skip normal merging process
+    #[arg(long)]
+    pub only_copy_empty: bool,
+
     /// Root directories to search for files
     #[arg(required = true)]
     pub root_dirs: Vec<PathBuf>,

@@ -210,6 +210,7 @@ pub fn process_group_with_dry_run(
     dry_run: bool,
     no_mmap: bool,
     copy_empty_dst: bool,
+    only_copy_empty: bool,
 ) -> io::Result<GroupStats> {
     let start_time = Instant::now();
     debug!("Processing paths for group {}: {:?}", basename, paths);
@@ -331,6 +332,17 @@ pub fn process_group_with_dry_run(
                 merged_files: successful_copies,
             });
         }
+    }
+
+    // If only_copy_empty is true, skip normal processing and return
+    if only_copy_empty {
+        info!("Skipping normal processing for group '{}' (only copy empty mode)", basename);
+        return Ok(GroupStats {
+            status: GroupStatus::Skipped,
+            processing_time: start_time.elapsed(),
+            bytes_processed: 0,
+            merged_files: Vec::new(),
+        });
     }
 
     let bytes_processed = if !writable_paths.is_empty() {
@@ -944,7 +956,7 @@ mod tests {
 
         let paths = vec![file1.clone(), file2.clone()];
         let stats =
-            process_group_with_dry_run(&paths, "video.mkv", false, &[], false, false, false)?;
+            process_group_with_dry_run(&paths, "video.mkv", false, &[], false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -968,7 +980,7 @@ mod tests {
         fs::write(&p2, vec![2u8, 0])?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false, false)?;
+        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Failed));
 
@@ -991,7 +1003,7 @@ mod tests {
         fs::write(&p2, &data)?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false, false)?;
+        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
 
@@ -1020,7 +1032,7 @@ mod tests {
 
         let paths = vec![file1.clone(), file2.clone()];
         let stats =
-            process_group_with_dry_run(&paths, "video.mkv", true, &[], false, false, false)?;
+            process_group_with_dry_run(&paths, "video.mkv", true, &[], false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
 
@@ -1066,7 +1078,7 @@ mod tests {
         let paths = vec![src_file.clone(), target_file.clone(), target2_file.clone()];
         let src_dirs = vec![src_dir.clone()];
         let stats =
-            process_group_with_dry_run(&paths, "video.mkv", false, &src_dirs, false, false, false)?;
+            process_group_with_dry_run(&paths, "video.mkv", false, &src_dirs, false, false, false, false)?;
 
         // Should fail because target files are incompatible (different non-zero bytes)
         assert!(matches!(stats.status, GroupStatus::Failed));
@@ -1410,7 +1422,7 @@ mod tests {
         fs::write(&file2, vec![0x00, 0x34, 0x00])?;
 
         let paths = vec![file1, file2];
-        let stats = process_group_with_dry_run(&paths, "test", false, &[], true, false, false)?;
+        let stats = process_group_with_dry_run(&paths, "test", false, &[], true, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 2); // Both files need merging in dry run
@@ -1433,7 +1445,7 @@ mod tests {
         let paths = vec![file1, file2];
         let src_dirs = vec![readonly_dir];
         let stats =
-            process_group_with_dry_run(&paths, "test", false, &src_dirs, false, false, false)?;
+            process_group_with_dry_run(&paths, "test", false, &src_dirs, false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
         assert_eq!(stats.merged_files.len(), 0);
@@ -1451,7 +1463,7 @@ mod tests {
         fs::write(&file2, "")?;
 
         let paths = vec![file1, file2];
-        let stats = process_group_with_dry_run(&paths, "test", false, &[], false, false, false)?;
+        let stats = process_group_with_dry_run(&paths, "test", false, &[], false, false, false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
         assert_eq!(stats.merged_files.len(), 0);
@@ -1482,7 +1494,7 @@ mod tests {
 
         // Test with copy_empty_dst enabled
         let stats =
-            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true)?;
+            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -1616,7 +1628,7 @@ mod tests {
 
         // Test with copy_empty_dst enabled - should handle multiple sources
         let stats =
-            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true)?;
+            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, true, false)?;
 
         // Should have merged successfully
         assert!(matches!(stats.status, GroupStatus::Merged));
@@ -1649,11 +1661,44 @@ mod tests {
 
         // Test with copy_empty_dst enabled - should match fuzzily
         let stats =
-            process_group_with_dry_run(&paths, "vido.mkv", false, &src_dirs, false, false, true)?;
+            process_group_with_dry_run(&paths, "vido.mkv", false, &src_dirs, false, false, true, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
         assert_eq!(fs::read(&target_file)?, src_data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_only_copy_empty_mode() -> io::Result<()> {
+        let temp_dir = tempdir()?;
+        let src_dir = temp_dir.path().join("src");
+        fs::create_dir(&src_dir)?;
+        let src_file = src_dir.join("test.bin");
+        let src_data = vec![1u8, 2, 3, 4, 5];
+        fs::write(&src_file, &src_data)?;
+
+        let target_dir = temp_dir.path().join("target");
+        fs::create_dir(&target_dir)?;
+        let target_file = target_dir.join("test.bin");
+        let null_data = vec![0u8; 5]; // Same size, all nulls
+        fs::write(&target_file, null_data)?;
+
+        let paths = vec![src_file.clone(), target_file.clone()];
+        let src_dirs = vec![src_dir.clone()];
+
+        // Test with only_copy_empty enabled - should skip normal processing
+        let stats =
+            process_group_with_dry_run(&paths, "test.bin", false, &src_dirs, false, false, false, true)?;
+
+        // Should be skipped because only_copy_empty is true
+        assert!(matches!(stats.status, GroupStatus::Skipped));
+        assert_eq!(stats.merged_files.len(), 0);
+        assert_eq!(stats.bytes_processed, 0);
+
+        // Target file should remain unchanged (still nulls)
+        assert_eq!(fs::read(&target_file)?, vec![0u8; 5]);
 
         Ok(())
     }

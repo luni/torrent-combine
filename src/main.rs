@@ -215,6 +215,7 @@ fn process_group(
         dry_run,
         args.no_mmap,
         args.copy_empty_dst,
+        args.only_copy_empty,
     )?;
 
     // Update cache
