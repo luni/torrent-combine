@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
   coverage:
     name: Code Coverage
@@ -46,3 +51,14 @@ jobs:
       with:
         files: lcov.info
         fail_ci_if_error: false
+        verbose: true
+      continue-on-error: true
+
+    - name: Coverage upload summary
+      run: |
+        echo "Coverage report generated at lcov.info"
+        echo "Coverage upload attempted with GitHub token"
+        if [ -f lcov.info ]; then
+          echo "Coverage file size: $(wc -c < lcov.info) bytes"
+          echo "Coverage file lines: $(wc -l < lcov.info) lines"
+        fi
