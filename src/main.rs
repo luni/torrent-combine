@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use log::error;
 use rayon::prelude::*;
 
-mod merger;
+pub mod merger;
 
 fn parse_file_size(s: &str) -> Result<u64, String> {
     let s = s.trim().to_lowercase();
@@ -39,12 +39,15 @@ enum DedupKey {
     FilenameAndSize,
     #[value(name = "size-only")]
     SizeOnly,
+    #[value(name = "extension-and-size")]
+    ExtensionAndSize,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 enum GroupKey {
     FilenameAndSize(String, u64),
     SizeOnly(u64),
+    ExtensionAndSize(String, u64),
 }
 
 #[derive(Parser, Debug)]
@@ -58,14 +61,21 @@ struct Args {
     #[arg(long)]
     replace: bool,
     #[arg(long)]
+    dry_run: bool,
+    #[arg(long, value_delimiter = ',', help = "File extensions to include (e.g., 'mkv,mp4,avi'). Default: all files")]
+    extensions: Vec<String>,
+    #[arg(long)]
     num_threads: Option<usize>,
     #[arg(long, value_enum, default_value = "filename-and-size")]
     dedup_mode: DedupKey,
+    #[arg(long, help = "Disable memory mapping for file I/O (auto-enabled for files ≥ 5MB)")]
+    no_mmap: bool,
 }
 
-fn collect_large_files(dirs: &[PathBuf], min_size: u64) -> io::Result<Vec<PathBuf>> {
+fn collect_large_files(dirs: &[PathBuf], min_size: u64, extensions: &[String]) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut dirs_to_process: Vec<PathBuf> = dirs.iter().cloned().collect();
+    let extensions: Vec<String> = extensions.iter().map(|ext| ext.to_lowercase()).collect();
 
     while let Some(current_dir) = dirs_to_process.pop() {
         for entry in fs::read_dir(&current_dir)? {
@@ -75,7 +85,13 @@ fn collect_large_files(dirs: &[PathBuf], min_size: u64) -> io::Result<Vec<PathBu
                 dirs_to_process.push(path);
             } else if let Ok(metadata) = fs::metadata(&path) {
                 if metadata.len() > min_size {
-                    files.push(path);
+                    // Check extension filter
+                    if extensions.is_empty() || path.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| extensions.contains(&ext.to_lowercase()))
+                        .unwrap_or(false) {
+                        files.push(path);
+                    }
                 }
             }
         }
@@ -91,6 +107,9 @@ fn main() -> io::Result<()> {
     env_logger::init();
 
     let args = Args::parse();
+    if args.dry_run {
+        log::info!("DRY-RUN MODE: No files will be modified. Showing what would happen.");
+    }
     log::info!("Processing root directory: {:?}", args.root_dir);
     if !args.src_dirs.is_empty() {
         log::info!("Source directories: {:?}", args.src_dirs);
@@ -107,7 +126,7 @@ fn main() -> io::Result<()> {
     all_dirs.extend(args.src_dirs.clone());
     let min_file_size = args.min_file_size.unwrap_or(merger::DEFAULT_MIN_FILE_SIZE);
     log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
-    let files = collect_large_files(&all_dirs, min_file_size)?;
+    let files = collect_large_files(&all_dirs, min_file_size, &args.extensions)?;
     log::info!("Found {} large files", files.len());
 
     let mut groups: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
@@ -125,6 +144,13 @@ fn main() -> io::Result<()> {
                     }
                 }
                 DedupKey::SizeOnly => GroupKey::SizeOnly(size),
+                DedupKey::ExtensionAndSize => {
+                    if let Some(extension) = file.extension().and_then(|ext| ext.to_str()) {
+                        GroupKey::ExtensionAndSize(extension.to_lowercase(), size)
+                    } else {
+                        continue;
+                    }
+                }
             };
             groups.entry(key).or_insert(Vec::new()).push(file);
         }
@@ -151,9 +177,10 @@ fn main() -> io::Result<()> {
             let group_name = match &group_key {
                 GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
                 GroupKey::SizeOnly(size) => format!("size-{}", size),
+                GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
             };
 
-            match merger::process_group(&paths, &group_name, args.replace, &args.src_dirs) {
+            match merger::process_group_with_dry_run(&paths, &group_name, args.replace, &args.src_dirs, args.dry_run, args.no_mmap) {
                 Ok(stats) => {
                     let processed_count =
                         groups_processed_cloned.fetch_add(1, Ordering::SeqCst) + 1;
@@ -232,6 +259,7 @@ mod tests {
             "FilenameAndSize"
         );
         assert_eq!(format!("{:?}", DedupKey::SizeOnly), "SizeOnly");
+        assert_eq!(format!("{:?}", DedupKey::ExtensionAndSize), "ExtensionAndSize");
     }
 
     #[test]
@@ -271,22 +299,24 @@ mod tests {
     }
 
     #[test]
-    fn test_group_name_formatting() {
-        let key1 = GroupKey::FilenameAndSize("video.mkv".to_string(), 2097152);
-        let key2 = GroupKey::SizeOnly(1048576);
+    fn test_group_name_formatting_with_extension() {
+        let key1 = GroupKey::ExtensionAndSize("mkv".to_string(), 2097152);
+        let key2 = GroupKey::ExtensionAndSize("mp4".to_string(), 1048576);
 
         let name1 = match &key1 {
             GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
             GroupKey::SizeOnly(size) => format!("size-{}", size),
+            GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
         };
 
         let name2 = match &key2 {
             GroupKey::FilenameAndSize(basename, size) => format!("{}@{}", basename, size),
             GroupKey::SizeOnly(size) => format!("size-{}", size),
+            GroupKey::ExtensionAndSize(extension, size) => format!("{}.{}", extension, size),
         };
 
-        assert_eq!(name1, "video.mkv@2097152");
-        assert_eq!(name2, "size-1048576");
+        assert_eq!(name1, "mkv.2097152");
+        assert_eq!(name2, "mp4.1048576");
     }
 
     #[test]

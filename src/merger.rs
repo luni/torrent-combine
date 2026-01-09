@@ -5,17 +5,46 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info};
 use tempfile::NamedTempFile;
+use memmap2::{Mmap, MmapOptions};
 
 const BUFFER_SIZE: usize = 1 << 20; // 1MB
 const BYTE_ALIGNMENT: usize = 8;
+const MMAP_THRESHOLD: u64 = 5 * 1024 * 1024; // 5MB - use mmap for files >= 5MB
 pub const DEFAULT_MIN_FILE_SIZE: u64 = 1_048_576; // 1MB
 
-struct FileFilter {
+// Mock temp file for dry-run mode
+#[derive(Debug)]
+struct MockTempFile;
+
+impl MockTempFile {
+    fn path(&self) -> &Path {
+        Path::new("/mock/dry-run")
+    }
+}
+
+// Trait to abstract temp file behavior
+trait TempFile {
+    fn path(&self) -> &Path;
+}
+
+impl TempFile for NamedTempFile {
+    fn path(&self) -> &Path {
+        NamedTempFile::path(self)
+    }
+}
+
+impl TempFile for MockTempFile {
+    fn path(&self) -> &Path {
+        MockTempFile::path(self)
+    }
+}
+
+pub struct FileFilter {
     src_dirs: Vec<PathBuf>,
 }
 
 impl FileFilter {
-    fn new(src_dirs: Vec<PathBuf>) -> Self {
+    pub fn new(src_dirs: Vec<PathBuf>) -> Self {
         Self { src_dirs }
     }
 
@@ -61,7 +90,7 @@ pub struct GroupStats {
     pub merged_files: Vec<PathBuf>,
 }
 
-pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool, src_dirs: &[PathBuf]) -> io::Result<GroupStats> {
+pub fn process_group_with_dry_run(paths: &[PathBuf], basename: &str, replace: bool, src_dirs: &[PathBuf], dry_run: bool, no_mmap: bool) -> io::Result<GroupStats> {
     let start_time = Instant::now();
     debug!("Processing paths for group {}: {:?}", basename, paths);
 
@@ -95,7 +124,25 @@ pub fn process_group(paths: &[PathBuf], basename: &str, replace: bool, src_dirs:
         });
     }
 
-    let res = check_sanity_and_completes(&writable_paths, &filter)?;
+    // Auto-detect optimal I/O method: use mmap for large files unless explicitly disabled
+    let should_use_mmap = if no_mmap {
+        // User explicitly disabled mmap - always use regular I/O
+        false
+    } else {
+        // Auto-detect: use mmap for large files, regular I/O for small files
+        bytes_processed >= MMAP_THRESHOLD
+    };
+
+    debug!("Using {} I/O for {} bytes (threshold: {})",
+           if should_use_mmap { "memory-mapped" } else { "regular" },
+           bytes_processed, MMAP_THRESHOLD);
+
+    let res = if dry_run {
+        Some((Box::new(MockTempFile) as Box<dyn TempFile>, vec![false; writable_paths.len()]))
+    } else {
+        check_sanity_and_completes(&writable_paths, &filter, should_use_mmap)?
+            .map(|(temp, complete)| (Box::new(temp) as Box<dyn TempFile>, complete))
+    };
 
     match res {
         Some((temp, is_complete)) => handle_successful_merge(
@@ -119,7 +166,7 @@ fn handle_successful_merge(
     filter: &FileFilter,
     basename: &str,
     replace: bool,
-    temp: NamedTempFile,
+    temp: Box<dyn TempFile>,
     is_complete: Vec<bool>,
     start_time: Instant,
     bytes_processed: u64,
@@ -148,21 +195,36 @@ fn handle_successful_merge(
                     continue;
                 }
 
-                let local_temp = NamedTempFile::new_in(parent)?;
-                fs::copy(temp.path(), local_temp.path())?;
-                if replace {
-                    fs::rename(local_temp.path(), path)?;
-                    debug!("Replaced original {:?} with merged content", path);
-                } else {
+                // Handle dry-run mode
+                if temp.path() == Path::new("/mock/dry-run") {
+                    // Dry-run: just simulate what would happen
                     let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-                    let merged_path = parent.join(format!("{}.merged", file_name));
-                    local_temp.persist(&merged_path)?;
-                    debug!(
-                        "Created merged file {:?} for incomplete original {:?}",
-                        merged_path,
-                        path
-                    );
+                    let merged_path = if replace {
+                        path.clone()
+                    } else {
+                        parent.join(format!("{}.merged", file_name))
+                    };
+                    info!("DRY-RUN: Would {} file: {:?}",
+                          if replace { "replace" } else { "create merged" }, merged_path);
                     merged_files.push(merged_path);
+                } else {
+                    // Real processing
+                    let local_temp = NamedTempFile::new_in(parent)?;
+                    fs::copy(temp.path(), local_temp.path())?;
+                    if replace {
+                        fs::rename(local_temp.path(), path)?;
+                        debug!("Replaced original {:?} with merged content", path);
+                    } else {
+                        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                        let merged_path = parent.join(format!("{}.merged", file_name));
+                        local_temp.persist(&merged_path)?;
+                        debug!(
+                            "Created merged file {:?} for incomplete original {:?}",
+                            merged_path,
+                            path
+                        );
+                        merged_files.push(merged_path);
+                    }
                 }
             }
         }
@@ -223,34 +285,77 @@ fn find_temp_directory<'a>(paths: &'a [PathBuf], filter: &FileFilter) -> io::Res
     })
 }
 
-fn perform_byte_merge(buffers: &mut [Vec<u8>], or_chunk: &mut [u8]) {
-    let or_chunk_len = or_chunk.len();
-    or_chunk.copy_from_slice(&buffers[0][..or_chunk_len]);
+fn perform_byte_merge_mmap(mmaps: &[Mmap], or_chunk: &mut [u8], offset: usize, chunk_size: usize) {
+    // Copy first mmap's chunk to or_chunk
+    or_chunk.copy_from_slice(&mmaps[0][offset..offset + chunk_size]);
 
     let or_chunk_ptr = or_chunk.as_ptr();
     let (prefix, words, suffix) = unsafe { or_chunk.align_to_mut::<u64>() };
 
     for b in prefix.iter_mut() {
-        let offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
-        for i in 1..buffers.len() {
-            *b |= buffers[i][offset];
+        let byte_offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
+        for i in 1..mmaps.len() {
+            *b |= mmaps[i][offset + byte_offset];
         }
     }
 
     for (j, w) in words.iter_mut().enumerate() {
-        for i in 1..buffers.len() {
-            let buffer_slice = &buffers[i][..or_chunk_len];
-            let (_, other_words, _) = unsafe { buffer_slice.align_to::<u64>() };
-            *w |= other_words[j];
+        let word_offset = j * 8;
+        for i in 1..mmaps.len() {
+            let mmap_slice = &mmaps[i][offset + word_offset..offset + word_offset + 8];
+            let (_, other_words, _) = unsafe { mmap_slice.align_to::<u64>() };
+            if !other_words.is_empty() {
+                *w |= other_words[0];
+            }
         }
     }
 
     for b in suffix.iter_mut() {
-        let offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
-        for i in 1..buffers.len() {
-            *b |= buffers[i][offset];
+        let byte_offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
+        for i in 1..mmaps.len() {
+            *b |= mmaps[i][offset + byte_offset];
         }
     }
+}
+
+fn validate_sanity_check_mmap(
+    mmaps: &[Mmap],
+    or_chunk: &[u8],
+    is_complete: &mut [bool],
+    offset: usize,
+    chunk_size: usize
+) -> io::Result<bool> {
+    for i in 0..mmaps.len() {
+        let mmap_slice = &mmaps[i][offset..offset + chunk_size];
+        if mmap_slice != or_chunk {
+            is_complete[i] = false;
+            let (prefix, words, suffix) = unsafe { mmap_slice.align_to::<u64>() };
+            let (or_prefix, or_words, or_suffix) = unsafe { or_chunk.align_to::<u64>() };
+
+            if !prefix
+                .iter()
+                .zip(or_prefix.iter())
+                .all(|(b, or_b)| *b == 0 || *b == *or_b)
+            {
+                return Ok(false);
+            }
+            if !words
+                .iter()
+                .zip(or_words.iter())
+                .all(|(w, or_w)| check_word_sanity(*w, *or_w))
+            {
+                return Ok(false);
+            }
+            if !suffix
+                .iter()
+                .zip(or_suffix.iter())
+                .all(|(b, or_b)| *b == 0 || *b == *or_b)
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn validate_sanity_check(
@@ -292,7 +397,37 @@ fn validate_sanity_check(
     Ok(true)
 }
 
-fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter) -> io::Result<Option<(NamedTempFile, Vec<bool>)>> {
+fn perform_byte_merge(buffers: &mut [Vec<u8>], or_chunk: &mut [u8]) {
+    let or_chunk_len = or_chunk.len();
+    or_chunk.copy_from_slice(&buffers[0][..or_chunk_len]);
+
+    let or_chunk_ptr = or_chunk.as_ptr();
+    let (prefix, words, suffix) = unsafe { or_chunk.align_to_mut::<u64>() };
+
+    for b in prefix.iter_mut() {
+        let offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
+        for i in 1..buffers.len() {
+            *b |= buffers[i][offset];
+        }
+    }
+
+    for (j, w) in words.iter_mut().enumerate() {
+        for i in 1..buffers.len() {
+            let buffer_slice = &buffers[i][..or_chunk_len];
+            let (_, other_words, _) = unsafe { buffer_slice.align_to::<u64>() };
+            *w |= other_words[j];
+        }
+    }
+
+    for b in suffix.iter_mut() {
+        let offset = (b as *const u8 as usize) - (or_chunk_ptr as usize);
+        for i in 1..buffers.len() {
+            *b |= buffers[i][offset];
+        }
+    }
+}
+
+pub fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter, use_mmap: bool) -> io::Result<Option<(NamedTempFile, Vec<bool>)>> {
     if paths.is_empty() {
         return Ok(None);
     }
@@ -310,45 +445,83 @@ fn check_sanity_and_completes(paths: &[PathBuf], filter: &FileFilter) -> io::Res
         }
     }
 
-    debug!("Checking sanity for {} files of size {}", paths.len(), size);
+    debug!("Checking sanity for {} files of size {} (mmap: {})", paths.len(), size, use_mmap);
 
     let temp_dir = find_temp_directory(paths, filter)?;
     let temp = NamedTempFile::new_in(temp_dir)?;
     let file = temp.reopen()?;
     let mut writer = BufWriter::new(file);
 
-    let mut readers: Vec<BufReader<File>> = Vec::with_capacity(paths.len());
-    for p in paths {
-        readers.push(BufReader::new(File::open(p)?));
-    }
-
-    let mut buffers: Vec<Vec<u8>> = (0..paths.len()).map(|_| vec![0; BUFFER_SIZE]).collect();
-    let mut is_complete = vec![true; paths.len()];
-    let mut or_chunk = vec![0; BUFFER_SIZE];
-
-    let mut processed = 0u64;
-    while processed < size {
-        let chunk_size = ((size - processed) as usize).min(BUFFER_SIZE);
-        let buffers_slice = &mut buffers;
-        let or_chunk_slice = &mut or_chunk[..chunk_size];
-
-        for (i, reader) in readers.iter_mut().enumerate() {
-            reader.read_exact(&mut buffers_slice[i][..chunk_size])?;
+    if use_mmap {
+        // Memory-mapped implementation
+        let mut mmaps: Vec<Mmap> = Vec::with_capacity(paths.len());
+        for p in paths {
+            let file = File::open(p)?;
+            let mmap = unsafe { MmapOptions::new().map(&file)? };
+            mmaps.push(mmap);
         }
 
-        perform_byte_merge(buffers_slice, or_chunk_slice);
+        let mut is_complete = vec![true; paths.len()];
+        let mut or_chunk = vec![0; BUFFER_SIZE];
 
-        if !validate_sanity_check(buffers_slice, or_chunk_slice, &mut is_complete, chunk_size)? {
-            return Ok(None);
+        let mut processed = 0u64;
+        while processed < size {
+            let chunk_size = ((size - processed) as usize).min(BUFFER_SIZE);
+            let or_chunk_slice = &mut or_chunk[..chunk_size];
+
+            // Copy first file's chunk to or_chunk
+            or_chunk_slice.copy_from_slice(&mmaps[0][processed as usize..processed as usize + chunk_size]);
+
+            // Perform byte merge with memory-mapped data
+            perform_byte_merge_mmap(&mmaps, or_chunk_slice, processed as usize, chunk_size);
+
+            // Validate sanity check
+            if !validate_sanity_check_mmap(&mmaps, or_chunk_slice, &mut is_complete, processed as usize, chunk_size)? {
+                return Ok(None);
+            }
+
+            writer.write_all(or_chunk_slice)?;
+            processed += chunk_size as u64;
         }
 
-        writer.write_all(or_chunk_slice)?;
-        processed += chunk_size as u64;
-    }
+        debug!("Processed {} of {} bytes for group with mmap", processed, size);
+        writer.flush()?;
+        Ok(Some((temp, is_complete)))
+    } else {
+        // Original buffered I/O implementation
+        let mut readers: Vec<BufReader<File>> = Vec::with_capacity(paths.len());
+        for p in paths {
+            readers.push(BufReader::new(File::open(p)?));
+        }
 
-    debug!("Processed {} of {} bytes for group", processed, size);
-    writer.flush()?;
-    Ok(Some((temp, is_complete)))
+        let mut buffers: Vec<Vec<u8>> = (0..paths.len()).map(|_| vec![0; BUFFER_SIZE]).collect();
+        let mut is_complete = vec![true; paths.len()];
+        let mut or_chunk = vec![0; BUFFER_SIZE];
+
+        let mut processed = 0u64;
+        while processed < size {
+            let chunk_size = ((size - processed) as usize).min(BUFFER_SIZE);
+            let buffers_slice = &mut buffers;
+            let or_chunk_slice = &mut or_chunk[..chunk_size];
+
+            for (i, reader) in readers.iter_mut().enumerate() {
+                reader.read_exact(&mut buffers_slice[i][..chunk_size])?;
+            }
+
+            perform_byte_merge(buffers_slice, or_chunk_slice);
+
+            if !validate_sanity_check(buffers_slice, or_chunk_slice, &mut is_complete, chunk_size)? {
+                return Ok(None);
+            }
+
+            writer.write_all(or_chunk_slice)?;
+            processed += chunk_size as u64;
+        }
+
+        debug!("Processed {} of {} bytes for group", processed, size);
+        writer.flush()?;
+        Ok(Some((temp, is_complete)))
+    }
 }
 
 #[cfg(test)]
@@ -367,7 +540,7 @@ mod tests {
 
         let paths = vec![p1];
 
-        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &FileFilter::new(vec![]))? {
+        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &FileFilter::new(vec![]), false)? {
             assert_eq!(is_complete, vec![true]);
             assert_eq!(fs::read(temp.path())?, data);
         } else {
@@ -386,7 +559,7 @@ mod tests {
         fs::write(&p2, vec![4u8, 5])?;
 
         let paths = vec![p1, p2];
-        let res = check_sanity_and_completes(&paths, &FileFilter::new(vec![]));
+        let res = check_sanity_and_completes(&paths, &FileFilter::new(vec![]), false);
         assert!(res.is_err());
         Ok(())
     }
@@ -401,7 +574,7 @@ mod tests {
         fs::write(&p2, vec![2u8, 0])?;
 
         let paths = vec![p1, p2];
-        let res = check_sanity_and_completes(&paths, &FileFilter::new(vec![]))?;
+        let res = check_sanity_and_completes(&paths, &FileFilter::new(vec![]), false)?;
         assert!(res.is_none());
         Ok(())
     }
@@ -423,7 +596,7 @@ mod tests {
 
         let paths = vec![p1, p2, p3];
 
-        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &FileFilter::new(vec![]))? {
+        if let Some((temp, is_complete)) = check_sanity_and_completes(&paths, &FileFilter::new(vec![]), false)? {
             assert_eq!(is_complete, vec![false, false, true]);
             assert_eq!(fs::read(temp.path())?, vec![1u8, 1, 0]);
         } else {
@@ -448,7 +621,7 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group(&paths, "video.mkv", false, &[])?;
+        let stats = process_group_with_dry_run(&paths, "video.mkv", false, &[], false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
         assert_eq!(stats.merged_files.len(), 1);
@@ -472,7 +645,7 @@ mod tests {
         fs::write(&p2, vec![2u8, 0])?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group(&paths, "dummy", false, &[])?;
+        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Failed));
 
@@ -495,7 +668,7 @@ mod tests {
         fs::write(&p2, &data)?;
 
         let paths = vec![p1.clone(), p2.clone()];
-        let stats = process_group(&paths, "dummy", false, &[])?;
+        let stats = process_group_with_dry_run(&paths, "dummy", false, &[], false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Skipped));
 
@@ -523,7 +696,7 @@ mod tests {
         fs::write(&file2, &data_complete)?;
 
         let paths = vec![file1.clone(), file2.clone()];
-        let stats = process_group(&paths, "video.mkv", true, &[])?;
+        let stats = process_group_with_dry_run(&paths, "video.mkv", true, &[], false, false)?;
 
         assert!(matches!(stats.status, GroupStatus::Merged));
 
@@ -568,7 +741,7 @@ mod tests {
 
         let paths = vec![src_file.clone(), target_file.clone(), target2_file.clone()];
         let src_dirs = vec![src_dir.clone()];
-        let stats = process_group(&paths, "video.mkv", false, &src_dirs)?;
+        let stats = process_group_with_dry_run(&paths, "video.mkv", false, &src_dirs, false, false)?;
 
         // Should fail because target files are incompatible (different non-zero bytes)
         assert!(matches!(stats.status, GroupStatus::Failed));

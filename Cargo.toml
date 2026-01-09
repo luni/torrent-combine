@@ -14,3 +14,11 @@ tempfile = "3.20"
 log = "0.4"
 env_logger = "0.11"
 rayon = "1.10"
+memmap2 = "0.9"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "io_performance"
+harness = false
