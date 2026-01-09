@@ -11,6 +11,28 @@ use rayon::prelude::*;
 
 mod merger;
 
+fn parse_file_size(s: &str) -> Result<u64, String> {
+    let s = s.trim().to_lowercase();
+
+    if s.ends_with("kb") {
+        let num: f64 = s.trim_end_matches("kb").parse()
+            .map_err(|_| format!("Invalid number in '{}'", s))?;
+        Ok((num * 1024.0) as u64)
+    } else if s.ends_with("mb") {
+        let num: f64 = s.trim_end_matches("mb").parse()
+            .map_err(|_| format!("Invalid number in '{}'", s))?;
+        Ok((num * 1024.0 * 1024.0) as u64)
+    } else if s.ends_with("gb") {
+        let num: f64 = s.trim_end_matches("gb").parse()
+            .map_err(|_| format!("Invalid number in '{}'", s))?;
+        Ok((num * 1024.0 * 1024.0 * 1024.0) as u64)
+    } else {
+        // Assume bytes if no suffix
+        s.parse()
+            .map_err(|_| format!("Invalid file size '{}'. Use format like '10MB', '1GB', or '1048576'", s))
+    }
+}
+
 #[derive(Debug, Clone, ValueEnum)]
 enum DedupKey {
     #[value(name = "filename-and-size")]
@@ -31,6 +53,8 @@ struct Args {
     root_dir: PathBuf,
     #[arg(long, value_delimiter = ',')]
     src_dirs: Vec<PathBuf>,
+    #[arg(long, value_parser = parse_file_size, help = "Minimum file size to process (e.g., '10MB', '1GB', '1048576'). Default: 1MB")]
+    min_file_size: Option<u64>,
     #[arg(long)]
     replace: bool,
     #[arg(long)]
@@ -39,7 +63,7 @@ struct Args {
     dedup_mode: DedupKey,
 }
 
-fn collect_large_files(dirs: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+fn collect_large_files(dirs: &[PathBuf], min_size: u64) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut dirs_to_process: Vec<PathBuf> = dirs.iter().cloned().collect();
 
@@ -50,7 +74,7 @@ fn collect_large_files(dirs: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
             if path.is_dir() {
                 dirs_to_process.push(path);
             } else if let Ok(metadata) = fs::metadata(&path) {
-                if metadata.len() > 1_048_576 {
+                if metadata.len() > min_size {
                     files.push(path);
                 }
             }
@@ -81,7 +105,9 @@ fn main() -> io::Result<()> {
 
     let mut all_dirs = vec![args.root_dir.clone()];
     all_dirs.extend(args.src_dirs.clone());
-    let files = collect_large_files(&all_dirs)?;
+    let min_file_size = args.min_file_size.unwrap_or(1_048_576); // Default to 1MB
+    log::info!("Minimum file size: {} bytes ({} MB)", min_file_size, min_file_size / 1_048_576);
+    let files = collect_large_files(&all_dirs, min_file_size)?;
     log::info!("Found {} large files", files.len());
 
     let mut groups: HashMap<GroupKey, Vec<PathBuf>> = HashMap::new();
@@ -261,5 +287,51 @@ mod tests {
 
         assert_eq!(name1, "video.mkv@2097152");
         assert_eq!(name2, "size-1048576");
+    }
+
+    #[test]
+    fn test_parse_file_size_bytes() {
+        assert_eq!(parse_file_size("1048576").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("1024").unwrap(), 1024);
+        assert_eq!(parse_file_size("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_parse_file_size_kilobytes() {
+        assert_eq!(parse_file_size("1KB").unwrap(), 1024);
+        assert_eq!(parse_file_size("10KB").unwrap(), 10_240);
+        assert_eq!(parse_file_size("1.5KB").unwrap(), 1536);
+        assert_eq!(parse_file_size("100kb").unwrap(), 102_400); // case insensitive
+    }
+
+    #[test]
+    fn test_parse_file_size_megabytes() {
+        assert_eq!(parse_file_size("1MB").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("10MB").unwrap(), 10_485_760);
+        assert_eq!(parse_file_size("0.5MB").unwrap(), 524_288);
+        assert_eq!(parse_file_size("2.5mb").unwrap(), 2_621_440); // case insensitive
+    }
+
+    #[test]
+    fn test_parse_file_size_gigabytes() {
+        assert_eq!(parse_file_size("1GB").unwrap(), 1_073_741_824);
+        assert_eq!(parse_file_size("2GB").unwrap(), 2_147_483_648);
+        assert_eq!(parse_file_size("0.5GB").unwrap(), 536_870_912);
+        assert_eq!(parse_file_size("1.5gb").unwrap(), 1_610_612_736); // case insensitive
+    }
+
+    #[test]
+    fn test_parse_file_size_invalid() {
+        assert!(parse_file_size("invalid").is_err());
+        assert!(parse_file_size("10XB").is_err());
+        assert!(parse_file_size("abcMB").is_err());
+        assert!(parse_file_size("").is_err());
+        assert!(parse_file_size("10.5.2MB").is_err());
+    }
+
+    #[test]
+    fn test_parse_file_size_whitespace() {
+        assert_eq!(parse_file_size(" 1MB ").unwrap(), 1_048_576);
+        assert_eq!(parse_file_size("\t10KB\n").unwrap(), 10_240);
     }
 }
